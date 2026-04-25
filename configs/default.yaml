@@ -1,0 +1,74 @@
+# =============================================================================
+# MvANet Configuration
+# =============================================================================
+# Mọi giá trị ở đây đều có thể bị ghi đè bằng CLI flags.
+# Ví dụ:  python train.py train --lr 0.01 --epochs 100
+#
+# Nếu không truyền flag nào, giá trị trong file này được dùng.
+# =============================================================================
+
+# --- Model ---
+model:
+  arch: "MvANet"               # Tên folder trong models/ (MvANet | MvANet_opt | ...)
+  name: "mvanet_2"             # mvanet_1_tiny | mvanet_1 | mvanet_2 | mvanet_3
+  num_classes: 4
+  in_channels: 3
+
+# --- Dataset ---
+data:
+  root: "./dataset"            # Thư mục chứa train/, val/, test/
+  input_size: 32               # 32 hoặc 96
+  batch_size_train: 64
+  batch_size_eval: 64
+  num_workers: 2
+  normalize_mean: [0.5, 0.5, 0.5]
+  normalize_std:  [0.5, 0.5, 0.5]
+
+# --- Training ---
+train:
+  epochs: 300
+  optimizer: "sgd"             # sgd | adam
+  lr: 0.001
+  momentum: 0.9
+  weight_decay: 1.0e-4
+
+  # LR Scheduler
+  lr_scheduler: "plateau"      # plateau | cosine | step
+  # ReduceLROnPlateau
+  plateau_mode: "min"
+  plateau_factor: 0.5
+  plateau_patience: 15
+  plateau_min_lr: 1.0e-5
+  # CosineAnnealingLR
+  cosine_T_max: 300
+  cosine_eta_min: 1.0e-5
+  # MultiStepLR
+  step_milestones: [120, 210, 270]
+  step_gamma: 0.1
+
+  # Class weights
+  use_class_weights: true
+
+  # Multi-run
+  num_runs: 1
+  seed: 42
+
+  # Checkpointing
+  save_dir: "./runs"
+  save_every: 50               # Lưu checkpoint mỗi N epoch
+  resume: null                 # Đường dẫn checkpoint để resume
+
+# --- Evaluation ---
+eval:
+  checkpoint: null             # Đường dẫn file .pth
+  batch_size: 64
+  visualize: true              # Lưu confusion matrix, biểu đồ
+
+# --- Export ---
+export:
+  checkpoint: null
+  output: null                 # Tự tạo nếu null
+  opset_version: 17
+  dynamic_batch: true
+  simplify: false
+  verify: false
