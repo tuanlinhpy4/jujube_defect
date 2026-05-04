@@ -1,0 +1,13 @@
+# Verified in the Codex local runtime on 2026-04-30.
+# Use this only when the exact wheel set is available for your platform.
+torch==2.11.0
+torchvision==0.26.0
+numpy==2.3.5
+Pillow==12.2.0
+PyYAML==6.0.3
+matplotlib==3.10.9
+onnx==1.21.0
+onnxscript==0.7.0
+onnx_ir==0.2.1
+ml_dtypes==0.5.4
+protobuf==7.34.1

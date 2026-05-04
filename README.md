@@ -1,193 +1,230 @@
-# MvANet — Multi-vision Attention Network
+# MvANet - Red Jujube Recognition
 
-Hệ thống phân loại táo tàu (jujube) bằng mạng MvANet, hỗ trợ **train / eval / export** qua CLI duy nhất.
+PyTorch implementation of Multi-vision Attention Network (MvANet) for red
+jujube grading. The repo is organized around one reproducible CLI for train,
+eval, inference, export, and model-complexity checks.
 
-## 📁 Cấu trúc project
+## Reproducibility Targets
 
+This repo was tightened against common A*/Q1 artifact expectations:
+
+- Paper setting is explicit in `configs/default.yaml`.
+- Install is one command for core training: `pip install -r requirements.txt`.
+- Train/eval/export commands are documented and share the same config path.
+- Randomness is controlled for Python, NumPy, PyTorch, CUDA, and DataLoader
+  workers.
+- Each run saves `config.yaml`, `environment.json`, `dataset_summary.json`,
+  checkpoints, metrics JSON, and plots.
+- Checkpoints include optimizer, scheduler, config, and RNG state for resume.
+
+See `REPRODUCIBILITY.md` for the submission checklist and exact seed protocol.
+
+References used for the audit:
+
+- Original paper/arXiv: https://arxiv.org/abs/1904.00388
+- PyTorch reproducibility note: https://docs.pytorch.org/docs/2.11/notes/randomness.html
+- NeurIPS paper checklist: https://neurips.cc/public/guides/PaperChecklist
+- Papers with Code research-code checklist: https://github.com/paperswithcode/releasing-research-code
+- ACM artifact badging criteria: https://www.acm.org/publications/policies/artifact-review-and-badging-current
+
+## Project Layout
+
+```text
+configs/
+  default.yaml          # paper-aligned single-run config
+  smoke.yaml            # one-epoch smoke-test config
+data/
+  dataset.py            # transforms, seeded splits, DataLoaders
+models/
+  mvanet.py             # original architecture, all code in one file
+  mvanet_opt.py         # optimized variant, all code in one file
+  MvANet*/              # legacy import shims for older checkpoints/scripts
+utils/
+  reproducibility.py    # seeds, RNG state, environment metadata
+  metrics.py            # accuracy, precision, recall, F1, confusion matrix
+  logger.py             # epoch and multi-run logging
+train.py                # main CLI: info/train/eval/export
+eval.py                 # standalone eval wrapper
+predict.py              # image or 5-image voting inference
+export_onnx.py          # standalone ONNX export
+count_flops.py          # optional ptflops complexity report
 ```
-MvANet/
-├── configs/
-│   └── default.yaml           # Config mặc định (mọi flag CLI đều override được)
-├── data/
-│   ├── __init__.py
-│   └── dataset.py             # DataLoader, transforms
-├── models/
-│   ├── __init__.py            # Dynamic registry — tự quét subfolder
-│   ├── MvANet/                # Model gốc (PReLU + SE + Conv3x3)
-│   │   ├── __init__.py
-│   │   ├── blocks.py
-│   │   └── mvanet.py
-│   └── MvANet_opt/            # Model tối ưu (ReLU + ECA + Ghost + DropPath)
-│       ├── __init__.py
-│       ├── blocks.py
-│       └── mvanet.py
-├── utils/
-│   ├── __init__.py
-│   ├── logger.py
-│   ├── metrics.py
-│   └── visualize.py
-├── train.py                   # CLI entry point chính
-├── eval.py                    # Eval script standalone
-├── export_onnx.py             # Export script standalone
-├── predict.py                 # Inference script
-├── count_flops.py             # So sánh FLOPs giữa các model
-├── visualize_features.py      # Visualization feature maps
-├── requirements.txt
-└── README.md
+
+## Add A Model
+
+New model architectures are single-file modules. Add one file under `models/`,
+for example `models/my_model.py`, and export:
+
+```python
+ARCH_NAME = "MyModel"
+MODEL_CONFIGS = {"small": {...}, "large": {...}}
+
+def build_model(name: str, num_classes: int = 4, in_channels: int = 3, **overrides):
+    ...
 ```
 
-## 🚀 Sử dụng nhanh
-
-### 1. Cài đặt
+Then run:
 
 ```bash
+python train.py train --arch MyModel --model small --data-root ./dataset
+```
+
+Do not create `blocks.py` plus `mvanet.py` for new models; keep the whole model
+definition in the one architecture file.
+
+## Setup
+
+Use Python 3.9+.
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 2. Chuẩn bị dataset
+Optional tools for ONNX export/verification and FLOPs:
 
+```bash
+pip install -r requirements-optional.txt
 ```
+
+## Dataset
+
+Expected class folder names and order:
+
+```text
 dataset/
-├── train/
-│   ├── invalid/
-│   ├── rotten/
-│   ├── wizened/
-│   └── normal/
-├── val/
-│   └── ...
-└── test/
-    └── ...
+  train/
+    invalid/
+    rotten/
+    wizened/
+    normal/
+  test/
+    invalid/
+    rotten/
+    wizened/
+    normal/
 ```
 
-### 3. Xem danh sách model
+If `dataset/val/` exists, it is used. If it does not exist, the code holds out
+`data.val_size` images from `train/` with the run seed. The default value is
+`1280`, matching the paper.
+
+## Paper-Aligned Defaults
+
+`configs/default.yaml` uses the reported MvANet paper setting where published:
+
+- `MvANet / mvanet_3`
+- input size `32x32`
+- train batch size `64`
+- eval batch size `5`
+- epochs `300`
+- optimizer `SGD`, momentum `0.9`
+- initial learning rate `0.1`
+- LR step decay by `0.1` at epochs `120`, `210`, `270`
+- augmentation: horizontal mirroring and rotation
+
+The paper does not publish dataset mean/std or weight decay. Defaults therefore
+do not invent them: `normalize_mean: null`, `normalize_std: null`,
+`weight_decay: 0.0`. If you use dataset-specific normalization, write the exact
+values into the config before training.
+
+## Commands
+
+List available models:
 
 ```bash
 python train.py info
 ```
 
-### 4. Train
+Run the default paper-aligned single run:
 
 ```bash
-# Train với default config
 python train.py train --data-root ./dataset
-
-# Train model cụ thể
-python train.py train --arch MvANet --model mvanet_2 --data-root ./dataset
-
-# Train model tối ưu
-python train.py train --arch MvANet_opt --model mvanet_1_tiny --data-root ./dataset
-
-# Tùy chỉnh hyperparameters
-python train.py train \
-    --arch MvANet \
-    --model mvanet_2 \
-    --data-root ./dataset \
-    --epochs 100 \
-    --lr 0.01 \
-    --optimizer adam \
-    --lr-scheduler cosine \
-    --batch-size 128 \
-    --input-size 96
-
-# Dùng file config khác
-python train.py train --config configs/my_config.yaml
-
-# Resume training
-python train.py train --resume runs/mvanet_2/run_01/last.pth --data-root ./dataset
 ```
 
-### 5. Đánh giá
+Train mode always evaluates the best checkpoint on `dataset/test/` after every
+seed. A training dataset therefore needs both a validation split and a test
+split. If `dataset/val/` is absent, `data.val_size` is held out from `train/`.
+
+Run the fixed 5-seed protocol:
 
 ```bash
-python train.py eval \
-    --checkpoint runs/mvanet_2/run_01/best.pth \
-    --data-root ./dataset \
-    --visualize
+python train.py train --data-root ./dataset --seed-mode five
 ```
 
-### 6. Export ONNX
+The five seeds are exactly `42, 123, 456, 789, 2024`. Single-seed mode uses
+`42`. The aggregate `multirun_summary.json` reports mean +/- std for test error
+and test accuracy across seeds. For any repeat count other than 1 or this fixed
+5-seed protocol, use `--seed-mode range` or pass explicit `--seeds`.
+
+Fast smoke test on a tiny local dataset:
 
 ```bash
-python train.py export \
-    --checkpoint runs/mvanet_2/run_01/best.pth \
-    --verify
+python train.py train --config configs/smoke.yaml --data-root ./dataset
 ```
 
-## 🔌 Thêm model mới
-
-Chỉ cần **3 bước**:
-
-1. Tạo folder `models/MyNewModel/`
-2. Đặt code vào đó (blocks.py, mvanet.py, hoặc tên bất kỳ)
-3. Tạo `__init__.py` export 2 symbol:
-
-```python
-# models/MyNewModel/__init__.py
-from .mvanet import build_model, MODEL_CONFIGS
-
-# MODEL_CONFIGS phải là dict: {"variant_name": {config_dict}, ...}
-# build_model(name, num_classes, in_channels) phải trả về nn.Module có method count_parameters()
-```
-
-Sau đó dùng ngay:
+Evaluate/test a checkpoint. This mode is only for existing weights and requires
+`--checkpoint`. For eval-only runs the data root may contain only `test/` or
+`val/`; class order is read from the checkpoint and checked against the split
+folders:
 
 ```bash
-python train.py train --arch MyNewModel --model variant_name
+python train.py eval --checkpoint runs/mvanet_3/run_01/best.pth --data-root ./dataset
 ```
 
-## 📋 Config Reference
+Predict one image:
 
-Tất cả tham số trong `configs/default.yaml` đều có thể override bằng CLI flag:
-
-| YAML key | CLI flag | Default | Mô tả |
-|---|---|---|---|
-| `model.arch` | `--arch` | MvANet | Tên folder architecture |
-| `model.name` | `--model` | mvanet_2 | Tên variant |
-| `model.num_classes` | `--num-classes` | 4 | Số lớp |
-| `data.root` | `--data-root` | ./dataset | Thư mục dataset |
-| `data.input_size` | `--input-size` | 32 | Resolution |
-| `data.batch_size_train` | `--batch-size` | 64 | Batch size train |
-| `train.epochs` | `--epochs` | 300 | Số epoch |
-| `train.optimizer` | `--optimizer` | sgd | sgd / adam / amsgrad |
-| `train.lr` | `--lr` | 0.001 | Learning rate |
-| `train.lr_scheduler` | `--lr-scheduler` | plateau | plateau / cosine / step |
-| `train.use_class_weights` | `--use-class-weights` | true | Dùng class weights |
-| `train.num_runs` | `--num-runs` | 1 | Số lần train lặp |
-| `train.seed` | `--seed` | 42 | Random seed |
-| `train.save_dir` | `--save-dir` | ./runs | Thư mục lưu kết quả |
-| `train.save_every` | `--save-every` | 50 | Lưu checkpoint mỗi N epoch |
-| `train.resume` | `--resume` | null | Resume từ checkpoint |
-
-## 🖥️ Sử dụng trên Google Colab
-
-```python
-# Cell 1: Mount Drive & setup
-from google.colab import drive
-drive.mount('/content/drive')
-
-# Cell 2: Clone/copy project
-!cp -r /content/drive/MyDrive/DATN/MvANet /content/MvANet
-%cd /content/MvANet
-!pip install -q -r requirements.txt
-
-# Cell 3: Xem models
-!python train.py info
-
-# Cell 4: Train
-!python train.py train \
-    --arch MvANet \
-    --model mvanet_2 \
-    --data-root /content/dataset \
-    --save-dir /content/runs \
-    --epochs 300 --lr 0.001
-
-# Cell 5: Eval
-!python train.py eval \
-    --checkpoint /content/runs/mvanet_2/run_01/best.pth \
-    --data-root /content/dataset
-
-# Cell 6: Export
-!python train.py export \
-    --checkpoint /content/runs/mvanet_2/run_01/best.pth \
-    --verify
+```bash
+python predict.py --checkpoint runs/mvanet_3/run_01/best.pth --input image.jpg
 ```
+
+Predict one jujube with the paper's five-image voting scheme:
+
+```bash
+python predict.py --checkpoint runs/mvanet_3/run_01/best.pth --input ./jujube_001 --voting
+```
+
+Export ONNX:
+
+```bash
+python train.py export --checkpoint runs/mvanet_3/run_01/best.pth --verify
+```
+
+Count FLOPs/MACs:
+
+```bash
+python count_flops.py --input-size 32
+```
+
+## Output Artifacts
+
+Each run is saved under:
+
+```text
+runs/<model_name>/run_XX/
+```
+
+Important files:
+
+- `config.yaml`: resolved training config
+- `environment.json`: Python/PyTorch/platform/Git metadata
+- `dataset_summary.json`: split sizes and class counts
+- `best.pth`, `last.pth`, `epoch_N.pth`: checkpoints with RNG state
+- `run_XX_history.json`: epoch metrics
+- `results.json`: test metrics for the best checkpoint
+- `training_curves.png`, confusion matrices, per-class metric plots
+- `../multirun_summary.json`: aggregate summary across repeated runs
+
+## Resume
+
+```bash
+python train.py train --resume runs/mvanet_3/run_01/last.pth --data-root ./dataset
+```
+
+Resume restores model, optimizer, scheduler, and RNG state. Exact bitwise resume
+still depends on the same PyTorch version, hardware/backend, and driver stack.
+Resume is intentionally single-run only: do not combine `--resume` with
+`--seed-mode five`, multiple `--seeds`, or `--num-runs > 1`. The checkpoint seed
+must match the requested seed.

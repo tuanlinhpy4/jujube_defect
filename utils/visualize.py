@@ -24,7 +24,8 @@ except ImportError:
 
 
 def _ensure_dir(path: str):
-    os.makedirs(path, exist_ok=True)
+    if path:
+        os.makedirs(path, exist_ok=True)
 
 
 # ===========================================================================
@@ -64,7 +65,7 @@ def plot_feature_maps(features: Dict, class_name: str = "",
     if n_stages == 1:
         axes = [axes]
 
-    fig.suptitle(f"Feature Maps — {class_name}", fontsize=14, y=1.02)
+    fig.suptitle(f"Feature Maps - {class_name}", fontsize=14, y=1.02)
 
     for ax, (name, feat) in zip(axes, stages):
         # Take first sample, average across channels
@@ -110,7 +111,7 @@ def plot_feature_maps_detailed(features: Dict, class_name: str = "",
     if max_receptors == 1:
         axes = axes.reshape(-1, 1)
 
-    fig.suptitle(f"Visual Receptor Outputs — {class_name}", fontsize=14)
+    fig.suptitle(f"Visual Receptor Outputs - {class_name}", fontsize=14)
 
     for i, layer_receptors in enumerate(visual_layers):
         for j in range(max_receptors):

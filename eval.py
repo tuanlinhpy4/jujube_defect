@@ -1,149 +1,150 @@
 #!/usr/bin/env python3
-"""
-eval.py — MvANet Evaluation Script (standalone)
-================================================
-Evaluate a trained model on the test set.
+"""Standalone evaluation wrapper for MvANet checkpoints.
 
-Usage:
-    python eval.py --checkpoint runs/mvanet_2/run_01/best.pth --data-root ./dataset
-    python eval.py --checkpoint best.pth --data-root ./dataset --visualize
-
-Hoặc dùng qua train.py:
-    python train.py eval --checkpoint best.pth --data-root ./dataset
+This script reuses the same deterministic DataLoader and metric code as
+``train.py eval`` so standalone evaluation cannot drift from the main CLI.
 """
+
+from __future__ import annotations
 
 import argparse
 import os
 import sys
-import time
-import json
 
 import torch
-import torch.nn as nn
 
 sys.path.insert(0, os.path.dirname(__file__))
-from models import build_model
-from data import get_eval_transforms
-from utils import (
-    MetricTracker,
-    plot_confusion_matrix, plot_per_class_metrics,
+
+from train import (
+    build_eval_dataloaders_from_config,
+    evaluate_and_save,
+    get_device,
+    load_checkpoint,
+    load_config,
+    seed_everything,
+    write_json,
 )
+from models import build_model
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate MvANet")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate an MvANet checkpoint")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--data-root", type=str, required=True)
-    parser.add_argument("--arch", type=str, default=None,
-                        help="Override architecture (default: from checkpoint)")
+    parser.add_argument("--config", type=str, default="configs/default.yaml")
+    parser.add_argument("--arch", type=str, default=None)
+    parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--input-size", type=int, default=None)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--visualize", action="store_true")
     parser.add_argument("--output-dir", type=str, default=None)
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
+    cfg = load_config(args.config)
+    cfg["data"]["root"] = args.data_root
+    if args.batch_size is not None:
+        cfg["data"]["batch_size_eval"] = args.batch_size
+    if args.num_workers is not None:
+        cfg["data"]["num_workers"] = args.num_workers
+    cfg.setdefault("eval", {})
+    cfg["eval"]["visualize"] = bool(args.visualize)
 
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.device)
+    device = get_device(args.device)
+    seed = int(cfg.get("train", {}).get("seed", 42))
+    deterministic = bool(cfg.get("train", {}).get("deterministic", True))
+    seed_everything(seed, deterministic=deterministic)
 
-    try:
-        import torch.serialization, numpy as _np
-        torch.serialization.add_safe_globals([_np._core.multiarray.scalar])
-    except Exception:
-        pass
+    ckpt = load_checkpoint(args.checkpoint, device)
+    ckpt_cfg = ckpt.get("config", {})
+    ckpt_model = ckpt_cfg.get("model", {})
+    ckpt_data = ckpt_cfg.get("data", {})
 
-    print(f"Loading checkpoint: {args.checkpoint}")
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    cfg = ckpt.get("config", {})
+    arch = args.arch or ckpt_model.get("arch", cfg["model"]["arch"])
+    model_name = args.model or ckpt_model.get("name", cfg["model"]["name"])
+    num_classes = int(ckpt_model.get("num_classes", cfg["model"]["num_classes"]))
+    in_channels = int(ckpt_model.get("in_channels", cfg["model"].get("in_channels", 3)))
+    input_size = args.input_size or ckpt_data.get("input_size", cfg["data"]["input_size"])
+    class_names = ckpt_data.get("classes", [])
 
-    arch = args.arch or cfg.get("model", {}).get("arch", "MvANet")
-    model_name = cfg.get("model", {}).get("name", "mvanet_3")
-    num_classes = cfg.get("model", {}).get("num_classes", 4)
-    input_size = args.input_size or cfg.get("data", {}).get("input_size", 32)
-    class_names = cfg.get("data", {}).get("classes", [])
+    cfg["model"].update(
+        {
+            "arch": arch,
+            "name": model_name,
+            "num_classes": num_classes,
+            "in_channels": in_channels,
+        }
+    )
+    cfg["data"]["input_size"] = int(input_size)
+    cfg["data"]["normalize_mean"] = ckpt_data.get(
+        "normalize_mean", cfg["data"].get("normalize_mean")
+    )
+    cfg["data"]["normalize_std"] = ckpt_data.get(
+        "normalize_std", cfg["data"].get("normalize_std")
+    )
 
-    print(f"Model: {arch}/{model_name} | Input: {input_size}x{input_size} | Classes: {num_classes}")
-
-    model = build_model(arch=arch, name=model_name, num_classes=num_classes).to(device)
+    model = build_model(
+        arch=arch,
+        name=model_name,
+        num_classes=num_classes,
+        in_channels=in_channels,
+    ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    print(f"Parameters: {model.count_parameters():,}")
 
-    # Data
-    from torchvision import datasets
-    from torch.utils.data import DataLoader
-
-    eval_tf = get_eval_transforms(input_size=input_size)
-    test_dir = os.path.join(args.data_root, "test")
-    assert os.path.isdir(test_dir), f"Test dir not found: {test_dir}"
-    test_ds = datasets.ImageFolder(test_dir, transform=eval_tf)
+    loaders = build_eval_dataloaders_from_config(
+        cfg, seed, device, class_names or None
+    )
     if not class_names:
-        class_names = test_ds.classes
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size,
-                             shuffle=False, num_workers=4, pin_memory=True)
+        class_names = loaders["class_names"]
+    elif list(class_names) != list(loaders["class_names"]):
+        raise ValueError(
+            "Checkpoint class order does not match dataset class order: "
+            f"checkpoint={class_names} dataset={loaders['class_names']}"
+        )
 
-    print(f"\nEvaluating on {len(test_ds)} test images...")
-    criterion = nn.CrossEntropyLoss()
-    tracker = MetricTracker(num_classes, class_names)
-
-    with torch.no_grad():
-        for images, labels in test_loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            _, preds = outputs.max(1)
-            tracker.update(preds, labels, loss.item(), images.size(0))
-
-    tracker.print_report()
-
-    # Inference time
-    print("Measuring inference time...")
-    dummy = torch.randn(1, 3, input_size, input_size).to(device)
-    for _ in range(10):
-        with torch.no_grad():
-            model(dummy)
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    times = []
-    for _ in range(100):
-        start = time.perf_counter()
-        with torch.no_grad():
-            model(dummy)
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        times.append((time.perf_counter() - start) * 1000)
-    avg_time = sum(times) / len(times)
-    print(f"  Avg inference: {avg_time:.2f} ms/image")
-
-    # Visualize & save
-    output_dir = args.output_dir or os.path.dirname(args.checkpoint)
-    if args.visualize:
-        plot_confusion_matrix(tracker.confusion_matrix(), class_names,
-                              os.path.join(output_dir, "eval_confusion_matrix.png"))
-        plot_confusion_matrix(tracker.confusion_matrix(), class_names,
-                              os.path.join(output_dir, "eval_confusion_matrix_norm.png"),
-                              normalize=True)
-        plot_per_class_metrics(tracker.per_class_metrics(),
-                               os.path.join(output_dir, "eval_per_class_metrics.png"))
+    criterion = torch.nn.CrossEntropyLoss()
+    output_dir = args.output_dir or os.path.dirname(args.checkpoint) or "."
 
     results = {
         "checkpoint": args.checkpoint,
-        "arch": arch, "model": model_name,
-        "test_accuracy": tracker.accuracy,
-        "test_error": tracker.error_rate,
-        "avg_time_ms": avg_time,
-        "per_class": tracker.per_class_metrics(),
-        "summary": tracker.summary(),
+        "arch": arch,
+        "model": model_name,
+        "classes": class_names,
     }
+    if "test" in loaders:
+        print("\nEvaluating test split...")
+        results["test"] = evaluate_and_save(
+            model,
+            loaders["test"],
+            criterion,
+            device,
+            class_names,
+            num_classes,
+            output_dir,
+            "eval_test",
+            bool(args.visualize),
+        )
+    if "val" in loaders:
+        print("\nEvaluating val split...")
+        results["val"] = evaluate_and_save(
+            model,
+            loaders["val"],
+            criterion,
+            device,
+            class_names,
+            num_classes,
+            output_dir,
+            "eval_val",
+            bool(args.visualize),
+        )
+
     results_path = os.path.join(output_dir, "eval_results.json")
-    with open(results_path, "w") as f:
-        json.dump(results, f, indent=2)
+    write_json(results_path, results)
     print(f"\nResults: {results_path}")
 
 

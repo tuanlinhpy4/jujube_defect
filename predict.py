@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-predict.py — MvANet Inference Script
-======================================
+predict.py - MvANet inference script
+====================================
 Run inference on single images or a directory of images.
 Supports the paper's 5-image voting scheme for individual jujube classification.
 
@@ -23,7 +23,7 @@ import time
 import json
 from pathlib import Path
 from collections import Counter
-from typing import List, Tuple
+from typing import List
 
 import torch
 import torch.nn.functional as F
@@ -59,29 +59,40 @@ def parse_args():
 
 
 def load_model(checkpoint_path: str, device: torch.device, arch_override=None):
-    """Load model from checkpoint."""
+    """Load model plus preprocessing metadata from a trusted checkpoint."""
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = ckpt.get("config", {})
 
     arch = arch_override or cfg.get("model", {}).get("arch", "MvANet")
     model_name = cfg.get("model", {}).get("name", "mvanet_3")
     num_classes = cfg.get("model", {}).get("num_classes", 4)
+    in_channels = cfg.get("model", {}).get("in_channels", 3)
     input_size = cfg.get("data", {}).get("input_size", 32)
     class_names = cfg.get("data", {}).get("classes", DEFAULT_CLASSES)
+    mean = cfg.get("data", {}).get("normalize_mean")
+    std = cfg.get("data", {}).get("normalize_std")
 
-    model = build_model(arch=arch, name=model_name, num_classes=num_classes).to(device)
+    model = build_model(
+        arch=arch,
+        name=model_name,
+        num_classes=num_classes,
+        in_channels=in_channels,
+    ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    return model, input_size, class_names
+    return model, input_size, class_names, mean, std
 
 
-def get_transform(input_size: int):
-    return transforms.Compose([
+def get_transform(input_size: int, mean=None, std=None):
+    """Build the same deterministic preprocessing used for eval/test."""
+    steps = [
         transforms.Resize((input_size, input_size)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-    ])
+    ]
+    if mean is not None and std is not None:
+        steps.append(transforms.Normalize(mean=mean, std=std))
+    return transforms.Compose(steps)
 
 
 def predict_single(model, image_path: str, transform, device: torch.device,
@@ -175,6 +186,8 @@ def get_image_paths(input_path: str) -> List[str]:
 
 def main():
     args = parse_args()
+    if args.top_k < 1:
+        raise ValueError("--top-k must be >= 1")
 
     # Device
     if args.device == "auto":
@@ -184,12 +197,14 @@ def main():
 
     # Load model
     print(f"Loading model from: {args.checkpoint}")
-    model, input_size, class_names = load_model(args.checkpoint, device, args.arch)
+    model, input_size, class_names, mean, std = load_model(
+        args.checkpoint, device, args.arch
+    )
 
     if args.input_size:
         input_size = args.input_size
 
-    transform = get_transform(input_size)
+    transform = get_transform(input_size, mean=mean, std=std)
     print(f"Input size: {input_size}x{input_size} | Classes: {class_names}")
 
     # Get images
@@ -202,9 +217,15 @@ def main():
 
     all_results = []
 
-    if args.voting and len(image_paths) >= 5:
+    if args.voting and len(image_paths) < 5:
+        raise ValueError("--voting requires at least 5 images")
+
+    if args.voting:
         # Process in groups of 5 (paper: 5 images per jujube)
         print("Using 5-image majority voting scheme\n")
+        leftover = len(image_paths) % 5
+        if leftover:
+            print(f"Warning: ignoring {leftover} leftover image(s) after full groups of 5.")
         for i in range(0, len(image_paths), 5):
             group = image_paths[i:i+5]
             if len(group) < 5:
@@ -244,8 +265,8 @@ def main():
     # Save results
     if args.output:
         os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
-        with open(args.output, 'w') as f:
-            json.dump(all_results, f, indent=2)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(all_results, f, indent=2, ensure_ascii=False)
         print(f"\nResults saved to: {args.output}")
 
 

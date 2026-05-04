@@ -1,81 +1,112 @@
 #!/usr/bin/env python3
-"""
-FLOPs counter: So sánh tất cả architectures có trong models/
-"""
+"""Count parameters and MACs/FLOPs for every registered MvANet variant."""
 
+from __future__ import annotations
+
+import argparse
 import os
 import sys
-import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
-
-try:
-    import ptflops
-except ImportError:
-    print("Cần cài ptflops: pip install ptflops")
-    sys.exit(1)
 
 from models import registry
 
 
-def parse_gflops(macs_str):
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Count MvANet model complexity")
+    parser.add_argument("--input-size", type=int, default=32)
+    parser.add_argument("--in-channels", type=int, default=3)
+    parser.add_argument("--num-classes", type=int, default=4)
+    return parser.parse_args()
+
+
+def require_ptflops():
+    """Import optional ptflops after argparse so --help still works."""
+
+    try:
+        import ptflops
+    except ImportError as exc:
+        raise SystemExit(
+            "ptflops is required for this script: "
+            "pip install -r requirements-optional.txt"
+        ) from exc
+    return ptflops
+
+
+def parse_gmacs(macs_str: str) -> float:
+    """Convert ptflops MAC string to GMACs."""
+
     parts = macs_str.split()
-    val = float(parts[0])
+    value = float(parts[0])
     unit = parts[1] if len(parts) > 1 else ""
     if "G" in unit:
-        return val
-    elif "M" in unit:
-        return val / 1000
-    elif "K" in unit:
-        return val / 1e6
-    else:
-        return val / 1e9
+        return value
+    if "M" in unit:
+        return value / 1_000.0
+    if "K" in unit:
+        return value / 1_000_000.0
+    return value / 1_000_000_000.0
 
 
-def analyze(arch_name, variants):
-    print(f"\n{'=' * 65}")
+def analyze(arch_name: str, variants, input_size: int, in_channels: int,
+            num_classes: int, ptflops_module):
+    print(f"\n{'=' * 72}")
     print(f"  {arch_name}")
-    print(f"{'=' * 65}")
+    print(f"{'=' * 72}")
     results = []
     for name in variants:
-        model = registry.build(arch_name, name, num_classes=4)
-        params = sum(p.numel() for p in model.parameters())
-        model.eval()
-        macs_str, _ = ptflops.get_model_complexity_info(
-            model,
-            input_res=(3, 32, 32),
-            input_constructor=lambda x: torch.randn(1, 3, 32, 32),
-            verbose=False,
+        model = registry.build(
+            arch_name, name, num_classes=num_classes, in_channels=in_channels
         )
-        gflops = parse_gflops(macs_str)
-        results.append((name, params, gflops, macs_str))
-        print(f"  {name:<16}  params: {params:>10,} ({params*4/1024:>8.1f} KB)"
-              f"  |  MACs: {macs_str:<12}  GFLOPs: {gflops:.4f}")
+        model.eval()
+        params = sum(p.numel() for p in model.parameters())
+
+        macs_str, _ = ptflops_module.get_model_complexity_info(
+            model,
+            input_res=(in_channels, input_size, input_size),
+            verbose=False,
+            print_per_layer_stat=False,
+        )
+        gmacs = parse_gmacs(macs_str)
+        results.append((name, params, gmacs, macs_str))
+        print(
+            f"  {name:<16} params: {params:>10,} "
+            f"({params * 4 / 1024:>8.1f} KB) | "
+            f"MACs: {macs_str:<12} GMACs: {gmacs:.4f}"
+        )
     return results
 
 
-print("=" * 65)
-print("  SO SÁNH TẤT CẢ MODELS")
-print("=" * 65)
+def main() -> None:
+    args = parse_args()
+    ptflops_module = require_ptflops()
+    print("=" * 72)
+    print(
+        f"  Model complexity at {args.in_channels}x"
+        f"{args.input_size}x{args.input_size}"
+    )
+    print("=" * 72)
 
-all_results = {}
-for arch_name in registry.list_archs():
-    variants = registry.list_variants(arch_name)
-    all_results[arch_name] = analyze(arch_name, variants)
+    all_results = {}
+    for arch_name in registry.list_archs():
+        variants = registry.list_variants(arch_name)
+        all_results[arch_name] = analyze(
+            arch_name, variants, args.input_size, args.in_channels,
+            args.num_classes, ptflops_module
+        )
 
-# Bảng so sánh nếu có >= 2 architectures
-archs = list(all_results.keys())
-if len(archs) >= 2:
-    a, b = archs[0], archs[1]
-    res_a, res_b = all_results[a], all_results[b]
-    print(f"\n{'=' * 65}")
-    print(f"  SO SÁNH: {a} vs {b}")
-    print(f"{'=' * 65}")
-    print(f"  {'Variant':<16} {a+' params':>14} {b+' params':>14} {'Params Down':>14}")
-    print(f"  {'-'*16} {'-'*14} {'-'*14} {'-'*14}")
-    for (name, pa, ga, _), (_, pb, gb, _) in zip(res_a, res_b):
-        if pa > 0:
-            pd = f"{(1-pb/pa)*100:+.1f}%"
-        else:
-            pd = "N/A"
-        print(f"  {name:<16} {pa:>14,} {pb:>14,} {pd:>14}")
+    archs = list(all_results.keys())
+    if len(archs) >= 2:
+        a, b = archs[0], archs[1]
+        print(f"\n{'=' * 72}")
+        print(f"  Parameter comparison: {a} vs {b}")
+        print(f"{'=' * 72}")
+        print(f"  {'Variant':<16} {a + ' params':>14} {b + ' params':>14} {'Change':>10}")
+        print(f"  {'-' * 16} {'-' * 14} {'-' * 14} {'-' * 10}")
+        for (name, pa, _, _), (_, pb, _, _) in zip(all_results[a], all_results[b]):
+            change = f"{(1 - pb / pa) * 100:+.1f}%" if pa else "N/A"
+            print(f"  {name:<16} {pa:>14,} {pb:>14,} {change:>10}")
+
+
+if __name__ == "__main__":
+    main()

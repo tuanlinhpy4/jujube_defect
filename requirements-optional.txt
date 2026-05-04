@@ -1,0 +1,7 @@
+# Optional tools for export/counting scripts.
+onnx>=1.15,<2
+onnxscript>=0.1,<1
+onnxruntime>=1.17,<2
+onnxsim>=0.4,<1
+onnxconverter-common>=1.14,<2
+ptflops>=0.7,<1

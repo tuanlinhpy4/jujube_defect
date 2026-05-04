@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-visualize_features.py — Feature Map & Attention Visualization
-==============================================================
+visualize_features.py - feature map and attention visualization
+===============================================================
 Visualize intermediate feature maps, SE attention weights, and
 per-receptor outputs (matching paper Fig. 8).
 
@@ -18,6 +18,7 @@ Usage:
 
 import argparse
 import os
+import sys
 from pathlib import Path
 from typing import List
 
@@ -80,16 +81,26 @@ def main():
     input_size = args.input_size or cfg.get("data", {}).get("input_size", 32)
     class_names = cfg.get("data", {}).get("classes", DEFAULT_CLASSES)
     arch = args.arch or cfg.get("model", {}).get("arch", "MvANet")
+    in_channels = cfg.get("model", {}).get("in_channels", 3)
+    mean = cfg.get("data", {}).get("normalize_mean")
+    std = cfg.get("data", {}).get("normalize_std")
 
-    model = build_model(arch=arch, name=model_name, num_classes=num_classes).to(device)
+    model = build_model(
+        arch=arch,
+        name=model_name,
+        num_classes=num_classes,
+        in_channels=in_channels,
+    ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    transform = transforms.Compose([
+    transform_steps = [
         transforms.Resize((input_size, input_size)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-    ])
+    ]
+    if mean is not None and std is not None:
+        transform_steps.append(transforms.Normalize(mean=mean, std=std))
+    transform = transforms.Compose(transform_steps)
 
     # Get images
     image_paths = get_image_paths(args.input)
