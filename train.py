@@ -132,9 +132,9 @@ def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
                     epoch: int = 0, total_epochs: int = 0) -> Dict:
     model.train()
     tracker = MetricTracker(num_classes, class_names)
-    pbar = tqdm(loader, desc=f"  Ep {epoch:>3}/{total_epochs} [Train]",
-                leave=False, dynamic_ncols=True, file=sys.stderr)
-    for images, labels in pbar:
+    
+    # Đã gỡ bỏ tqdm lồng nhau ở đây
+    for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
         outputs = model(images)
@@ -143,7 +143,7 @@ def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
         optimizer.step()
         preds = outputs.argmax(dim=1)
         tracker.update(preds, labels, float(loss.item()), len(labels), logits=outputs)
-        pbar.set_postfix(loss=f"{tracker.avg_loss:.4f}", acc=f"{tracker.accuracy:.1f}%")
+        
     return tracker.summary()
 
 
@@ -153,14 +153,15 @@ def evaluate(model: nn.Module, loader, criterion, device: torch.device,
              desc: str = "  Eval ") -> Tuple[Dict, MetricTracker]:
     model.eval()
     tracker = MetricTracker(num_classes, class_names)
-    pbar = tqdm(loader, desc=desc, leave=False, dynamic_ncols=True, file=sys.stderr)
-    for images, labels in pbar:
+    
+    # Đã gỡ bỏ tqdm lồng nhau ở đây
+    for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
         outputs = model(images)
         loss = criterion(outputs, labels)
         preds = outputs.argmax(dim=1)
         tracker.update(preds, labels, float(loss.item()), len(labels), logits=outputs)
-        pbar.set_postfix(loss=f"{tracker.avg_loss:.4f}", acc=f"{tracker.accuracy:.1f}%")
+        
     return tracker.summary(), tracker
 
 
