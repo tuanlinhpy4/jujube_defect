@@ -132,7 +132,9 @@ def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
                     epoch: int = 0, total_epochs: int = 0) -> Dict:
     model.train()
     tracker = MetricTracker(num_classes, class_names)
-    for images, labels in loader:
+    pbar = tqdm(loader, desc=f"  Ep {epoch:>3}/{total_epochs} [Train]",
+                leave=False, dynamic_ncols=True, file=sys.stderr)
+    for images, labels in pbar:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
         outputs = model(images)
@@ -141,6 +143,7 @@ def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
         optimizer.step()
         preds = outputs.argmax(dim=1)
         tracker.update(preds, labels, float(loss.item()), len(labels), logits=outputs)
+        pbar.set_postfix(loss=f"{tracker.avg_loss:.4f}", acc=f"{tracker.accuracy:.1f}%")
     return tracker.summary()
 
 
@@ -150,12 +153,14 @@ def evaluate(model: nn.Module, loader, criterion, device: torch.device,
              desc: str = "  Eval ") -> Tuple[Dict, MetricTracker]:
     model.eval()
     tracker = MetricTracker(num_classes, class_names)
-    for images, labels in loader:
+    pbar = tqdm(loader, desc=desc, leave=False, dynamic_ncols=True, file=sys.stderr)
+    for images, labels in pbar:
         images, labels = images.to(device), labels.to(device)
         outputs = model(images)
         loss = criterion(outputs, labels)
         preds = outputs.argmax(dim=1)
         tracker.update(preds, labels, float(loss.item()), len(labels), logits=outputs)
+        pbar.set_postfix(loss=f"{tracker.avg_loss:.4f}", acc=f"{tracker.accuracy:.1f}%")
     return tracker.summary(), tracker
 
 
@@ -429,23 +434,14 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
         scheduler.step()
         current_lr = optimizer.param_groups[0]["lr"]
         is_best = logger.log_epoch(epoch, train_metrics, val_metrics, current_lr)
-        # Update stderr bar postfix
+        best_marker = " ★" if is_best else ""
         epoch_bar.set_postfix(
             tr_acc=f"{train_metrics['accuracy']:.1f}%",
             val_acc=f"{val_metrics['accuracy']:.1f}%",
             val_loss=f"{val_metrics['loss']:.4f}",
             lr=f"{current_lr:.1e}",
-            best="★" if is_best else "",
+            best=best_marker,
             refresh=True,
-        )
-        # Also print one clean line per epoch to stdout (visible in logs/redirected output)
-        best_marker = " ★ best" if is_best else ""
-        print(
-            f"  ep {epoch:>3}/{epochs}"
-            f"  tr_loss={train_metrics['loss']:.4f}  tr_acc={train_metrics['accuracy']:.2f}%"
-            f"  val_loss={val_metrics['loss']:.4f}  val_acc={val_metrics['accuracy']:.2f}%"
-            f"  lr={current_lr:.2e}{best_marker}",
-            flush=True,
         )
         if is_best:
             best_state = copy.deepcopy(model.state_dict())
