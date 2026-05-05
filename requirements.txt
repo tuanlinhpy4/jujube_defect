@@ -1,5 +1,3 @@
-# Core runtime. The ranges keep installation practical across CPU/CUDA wheels
-# while still bounding the tested API surface.
 torch>=2.1,<2.12
 torchvision>=0.16,<0.27
 numpy>=1.24,<3

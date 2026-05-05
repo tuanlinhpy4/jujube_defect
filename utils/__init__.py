@@ -1,5 +1,5 @@
 from .metrics import MetricTracker
-from .logger import TrainingLogger, MultiRunLogger
+from .logger import TrainingLogger, MultiSeedLogger
 from .reproducibility import (
     collect_environment,
     get_rng_state,
