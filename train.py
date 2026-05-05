@@ -132,9 +132,7 @@ def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
                     epoch: int = 0, total_epochs: int = 0) -> Dict:
     model.train()
     tracker = MetricTracker(num_classes, class_names)
-    desc = f"  Train {epoch:>3}/{total_epochs}"
-    pbar = tqdm(loader, desc=desc, leave=False, dynamic_ncols=True, unit="batch")
-    for images, labels in pbar:
+    for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
         outputs = model(images)
@@ -143,9 +141,6 @@ def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
         optimizer.step()
         preds = outputs.argmax(dim=1)
         tracker.update(preds, labels, float(loss.item()), len(labels), logits=outputs)
-        s = tracker.summary()
-        pbar.set_postfix(loss=f"{s['loss']:.4f}", acc=f"{s['accuracy']:.2f}%", refresh=False)
-    pbar.close()
     return tracker.summary()
 
 
@@ -155,16 +150,12 @@ def evaluate(model: nn.Module, loader, criterion, device: torch.device,
              desc: str = "  Eval ") -> Tuple[Dict, MetricTracker]:
     model.eval()
     tracker = MetricTracker(num_classes, class_names)
-    pbar = tqdm(loader, desc=desc, leave=False, dynamic_ncols=True, unit="batch")
-    for images, labels in pbar:
+    for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
         outputs = model(images)
         loss = criterion(outputs, labels)
         preds = outputs.argmax(dim=1)
         tracker.update(preds, labels, float(loss.item()), len(labels), logits=outputs)
-        s = tracker.summary()
-        pbar.set_postfix(loss=f"{s['loss']:.4f}", acc=f"{s['accuracy']:.2f}%", refresh=False)
-    pbar.close()
     return tracker.summary(), tracker
 
 
@@ -426,7 +417,7 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
 
     print(f"\n  Training for {epochs} epochs...")
     epoch_bar = tqdm(range(1, epochs + 1), desc=f"  Seed {seed}", unit="ep",
-                     dynamic_ncols=True)
+                     dynamic_ncols=True, file=sys.stderr)
     for epoch in epoch_bar:
         train_metrics = train_one_epoch(
             model, loaders["train"], criterion, optimizer,
@@ -438,15 +429,23 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
         scheduler.step()
         current_lr = optimizer.param_groups[0]["lr"]
         is_best = logger.log_epoch(epoch, train_metrics, val_metrics, current_lr)
-        # Update outer bar with summary after each epoch
+        # Update stderr bar postfix
         epoch_bar.set_postfix(
-            tr_loss=f"{train_metrics['loss']:.4f}",
-            tr_acc=f"{train_metrics['accuracy']:.2f}%",
+            tr_acc=f"{train_metrics['accuracy']:.1f}%",
+            val_acc=f"{val_metrics['accuracy']:.1f}%",
             val_loss=f"{val_metrics['loss']:.4f}",
-            val_acc=f"{val_metrics['accuracy']:.2f}%",
-            lr=f"{current_lr:.2e}",
+            lr=f"{current_lr:.1e}",
             best="★" if is_best else "",
             refresh=True,
+        )
+        # Also print one clean line per epoch to stdout (visible in logs/redirected output)
+        best_marker = " ★ best" if is_best else ""
+        print(
+            f"  ep {epoch:>3}/{epochs}"
+            f"  tr_loss={train_metrics['loss']:.4f}  tr_acc={train_metrics['accuracy']:.2f}%"
+            f"  val_loss={val_metrics['loss']:.4f}  val_acc={val_metrics['accuracy']:.2f}%"
+            f"  lr={current_lr:.2e}{best_marker}",
+            flush=True,
         )
         if is_best:
             best_state = copy.deepcopy(model.state_dict())
@@ -483,8 +482,7 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
     # Test evaluation
     # -----------------------------------------------------------------------
     test_metrics, test_tracker = evaluate(
-        model, loaders["test"], criterion, device, num_classes, class_names,
-        desc="  Test  ")
+        model, loaders["test"], criterion, device, num_classes, class_names)
     test_tracker.print_report(split=f"Test (seed={seed})")
 
     cm = test_tracker.confusion_matrix()
