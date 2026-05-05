@@ -5,7 +5,7 @@ class_names: [niaozhuo, meibian, liekou, haozao, gantiao, bianxing]
 input_size: 224
 batch_size_train: 32
 batch_size_eval: 32
-num_workers: 4
+num_workers: 2
 epochs: 100
 optimizer: adamw
 lr: 0.001
