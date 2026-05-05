@@ -34,7 +34,7 @@ DATASETS: Dict[str, Dict] = {
         ],
     },
     "jujube_ours": {
-        "gdrive_id": "1G1t1NRWBLPjxmjlEaRiJFueEeHS3GI9D",
+        "gdrive_id": "19Q8LhNdSsdWjAy0HkaeMMutN2KBgxoH5",
         "default_root": "./data/jujube_ours",
         "expected_classes": [
             "dry", "insect_damaged", "cracked", "mold", "invalid",
