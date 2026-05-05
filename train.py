@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import yaml
+from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -127,10 +128,13 @@ def build_scheduler(optimizer, cfg: Dict, epochs: int):
 
 def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
                     device: torch.device, num_classes: int,
-                    class_names: List[str]) -> Dict:
+                    class_names: List[str],
+                    epoch: int = 0, total_epochs: int = 0) -> Dict:
     model.train()
     tracker = MetricTracker(num_classes, class_names)
-    for images, labels in loader:
+    desc = f"  Train {epoch:>3}/{total_epochs}"
+    pbar = tqdm(loader, desc=desc, leave=False, dynamic_ncols=True, unit="batch")
+    for images, labels in pbar:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
         outputs = model(images)
@@ -139,20 +143,28 @@ def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
         optimizer.step()
         preds = outputs.argmax(dim=1)
         tracker.update(preds, labels, float(loss.item()), len(labels), logits=outputs)
+        s = tracker.summary()
+        pbar.set_postfix(loss=f"{s['loss']:.4f}", acc=f"{s['accuracy']:.2f}%", refresh=False)
+    pbar.close()
     return tracker.summary()
 
 
 @torch.no_grad()
 def evaluate(model: nn.Module, loader, criterion, device: torch.device,
-             num_classes: int, class_names: List[str]) -> Tuple[Dict, MetricTracker]:
+             num_classes: int, class_names: List[str],
+             desc: str = "  Eval ") -> Tuple[Dict, MetricTracker]:
     model.eval()
     tracker = MetricTracker(num_classes, class_names)
-    for images, labels in loader:
+    pbar = tqdm(loader, desc=desc, leave=False, dynamic_ncols=True, unit="batch")
+    for images, labels in pbar:
         images, labels = images.to(device), labels.to(device)
         outputs = model(images)
         loss = criterion(outputs, labels)
         preds = outputs.argmax(dim=1)
         tracker.update(preds, labels, float(loss.item()), len(labels), logits=outputs)
+        s = tracker.summary()
+        pbar.set_postfix(loss=f"{s['loss']:.4f}", acc=f"{s['accuracy']:.2f}%", refresh=False)
+    pbar.close()
     return tracker.summary(), tracker
 
 
@@ -413,15 +425,29 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
     best_val_acc = 0.0
 
     print(f"\n  Training for {epochs} epochs...")
-    for epoch in range(1, epochs + 1):
+    epoch_bar = tqdm(range(1, epochs + 1), desc=f"  Seed {seed}", unit="ep",
+                     dynamic_ncols=True)
+    for epoch in epoch_bar:
         train_metrics = train_one_epoch(
             model, loaders["train"], criterion, optimizer,
-            device, num_classes, class_names)
+            device, num_classes, class_names,
+            epoch=epoch, total_epochs=epochs)
         val_metrics, _ = evaluate(
-            model, loaders["val"], criterion, device, num_classes, class_names)
+            model, loaders["val"], criterion, device, num_classes, class_names,
+            desc=f"  Val   {epoch:>3}/{epochs}")
         scheduler.step()
         current_lr = optimizer.param_groups[0]["lr"]
         is_best = logger.log_epoch(epoch, train_metrics, val_metrics, current_lr)
+        # Update outer bar with summary after each epoch
+        epoch_bar.set_postfix(
+            tr_loss=f"{train_metrics['loss']:.4f}",
+            tr_acc=f"{train_metrics['accuracy']:.2f}%",
+            val_loss=f"{val_metrics['loss']:.4f}",
+            val_acc=f"{val_metrics['accuracy']:.2f}%",
+            lr=f"{current_lr:.2e}",
+            best="★" if is_best else "",
+            refresh=True,
+        )
         if is_best:
             best_state = copy.deepcopy(model.state_dict())
             best_val_acc = val_metrics["accuracy"]
@@ -438,6 +464,7 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
             }, os.path.join(run_dir, "best.pth"))
 
     logger.save_history()
+    epoch_bar.close()
     history = logger.get_history()
     plot_training_curves(
         history, save_path=os.path.join(run_dir, "training_curves.png"))
@@ -456,7 +483,8 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
     # Test evaluation
     # -----------------------------------------------------------------------
     test_metrics, test_tracker = evaluate(
-        model, loaders["test"], criterion, device, num_classes, class_names)
+        model, loaders["test"], criterion, device, num_classes, class_names,
+        desc="  Test  ")
     test_tracker.print_report(split=f"Test (seed={seed})")
 
     cm = test_tracker.confusion_matrix()
