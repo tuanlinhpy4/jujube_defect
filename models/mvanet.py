@@ -306,6 +306,8 @@ MODEL_CONFIGS = {
                      t=1.5, a1=0.7, a2=0.6, p=3),
 }
 
+DEFAULT_VARIANT = "mvanet_3"
+
 
 def build_model(name: str = "mvanet_3", num_classes: int = 4,
                 in_channels: int = 3, **overrides) -> MvANet:

@@ -1,22 +1,33 @@
 """
 Visualization Utilities
 =======================
-- Feature map visualization (matching paper Fig. 8)
+- GradCAM heatmap (standalone script + importable)
 - Confusion matrix heatmap
 - Training loss/accuracy curves
 - Per-class metric bar charts
+- Feature map visualization
 - SE attention weight visualization
+
+Standalone GradCAM usage:
+    python visualize.py \
+        --weights runs/jujube/mobilenet_v3_small/cross_entropy/seed_1/best.pth \
+        --data-root data/jujube \
+        --output-dir runs/jujube/mobilenet_v3_small/cross_entropy/seed_1/gradcam
 """
 
+from __future__ import annotations
+
+import argparse
 import os
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
-from typing import Dict, List, Optional
 
 try:
     import matplotlib
-    matplotlib.use('Agg')  # non-interactive backend
+    matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    import matplotlib.gridspec as gridspec
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False
@@ -29,107 +40,216 @@ def _ensure_dir(path: str):
 
 
 # ===========================================================================
-# Feature Map Visualization (Paper Fig. 8)
+# GradCAM
 # ===========================================================================
 
-def plot_feature_maps(features: Dict, class_name: str = "",
-                      save_path: Optional[str] = None, max_channels: int = 16):
-    """Visualize feature maps from each stage (like paper Fig. 8).
+class GradCAM:
+    """Gradient-weighted Class Activation Mapping.
 
-    Args:
-        features: dict from model.forward_with_features()
-        class_name: label for the input image
-        save_path: where to save the figure
-        max_channels: max channels to show per feature map
+    Works with any CNN that has at least one Conv2d layer.
+    Hooks onto the *last* Conv2d by default, which gives the best spatial
+    resolution trade-off for standard classification CNNs (ResNet, MobileNet,
+    EfficientNet, ShuffleNet, SqueezeNet, MNASNet).
+
+    Usage:
+        cam = GradCAM(model)
+        heatmap, pred_class = cam(image_tensor)   # image_tensor: (1,C,H,W)
+        cam.remove_hooks()
     """
-    if not HAS_MPL:
-        return
 
-    stages = []
+    def __init__(self, model, target_layer=None):
+        import torch.nn as nn
+        self.model = model
+        self._activations: Optional[np.ndarray] = None
+        self._gradients: Optional[np.ndarray] = None
+        self._hooks: list = []
 
-    # Shallow output
-    if "shallow" in features:
-        stages.append(("Shallow Output", features["shallow"]))
+        # Auto-select last Conv2d if none provided
+        if target_layer is None:
+            last_conv = None
+            for m in model.modules():
+                if isinstance(m, nn.Conv2d):
+                    last_conv = m
+            if last_conv is None:
+                raise ValueError("No Conv2d layer found in model.")
+            target_layer = last_conv
 
-    # Visual layer outputs
-    if "visual_layers" in features:
-        for i, layer_receptors in enumerate(features["visual_layers"]):
-            for j, receptor_out in enumerate(layer_receptors):
-                stages.append((f"VL{i+1} VR{j+1}", receptor_out))
+        self._register_hooks(target_layer)
 
-    if not stages:
-        return
+    def _register_hooks(self, layer):
+        def fwd(module, inp, out):
+            self._activations = out.detach().cpu().numpy()
 
-    n_stages = len(stages)
-    fig, axes = plt.subplots(1, n_stages, figsize=(3 * n_stages, 3))
-    if n_stages == 1:
-        axes = [axes]
+        def bwd(module, grad_in, grad_out):
+            self._gradients = grad_out[0].detach().cpu().numpy()
 
-    fig.suptitle(f"Feature Maps - {class_name}", fontsize=14, y=1.02)
+        self._hooks.append(layer.register_forward_hook(fwd))
+        self._hooks.append(layer.register_full_backward_hook(bwd))
 
-    for ax, (name, feat) in zip(axes, stages):
-        # Take first sample, average across channels
-        if feat.dim() == 4:
-            feat_map = feat[0].detach().cpu()
+    def remove_hooks(self):
+        for h in self._hooks:
+            h.remove()
+        self._hooks.clear()
+
+    def __call__(self, input_tensor, target_class: Optional[int] = None
+                 ) -> Tuple[np.ndarray, int]:
+        """
+        Args:
+            input_tensor: (1, C, H, W) float tensor on model's device.
+            target_class: class index to explain. None → argmax (predicted class).
+
+        Returns:
+            heatmap: (H, W) numpy array in [0, 1], same spatial size as input.
+            target_class: the class index that was explained.
+        """
+        import torch
+        import torch.nn.functional as F
+
+        self.model.eval()
+        self.model.zero_grad()
+
+        output = self.model(input_tensor)           # (1, num_classes)
+
+        if target_class is None:
+            target_class = int(output.argmax(dim=1).item())
+
+        # Backprop score of target class
+        score = output[0, target_class]
+        score.backward()
+
+        # Grad-CAM: global-average-pool gradients → channel weights
+        # shapes: activations (1, C, h, w), gradients (1, C, h, w)
+        weights = self._gradients.mean(axis=(2, 3), keepdims=True)   # (1, C, 1, 1)
+        cam = (weights * self._activations).sum(axis=1, keepdims=True)  # (1, 1, h, w)
+        cam = np.maximum(cam, 0)                   # ReLU
+
+        # Normalize to [0, 1]
+        cam_min, cam_max = cam.min(), cam.max()
+        if cam_max > cam_min:
+            cam = (cam - cam_min) / (cam_max - cam_min)
         else:
-            feat_map = feat.detach().cpu()
+            cam = np.zeros_like(cam)
 
-        # Show mean activation across channels
-        mean_map = feat_map[:max_channels].mean(dim=0).numpy()
-        im = ax.imshow(mean_map, cmap='hot', interpolation='nearest')
-        ax.set_title(name, fontsize=8)
-        ax.axis('off')
-
-    plt.tight_layout()
-    if save_path:
-        _ensure_dir(os.path.dirname(save_path))
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"  Saved feature map: {save_path}")
-    plt.close()
+        # Resize to input spatial size
+        h, w = input_tensor.shape[2], input_tensor.shape[3]
+        cam_tensor = torch.from_numpy(cam).float()
+        cam_resized = F.interpolate(
+            cam_tensor, size=(h, w), mode="bilinear", align_corners=False
+        )
+        return cam_resized[0, 0].numpy(), target_class
 
 
-def plot_feature_maps_detailed(features: Dict, class_name: str = "",
-                                save_path: Optional[str] = None):
-    """Detailed feature map visualization showing individual VR channels.
+def _load_image_tensor(img_path: str, input_size: int, normalize_mean, normalize_std):
+    """Load a PIL image and return (display_array, model_tensor)."""
+    from PIL import Image
+    import torch
+    from torchvision import transforms
 
-    Closer to paper Fig. 8 layout: rows = visual layers, cols = visual receptors.
+    img = Image.open(img_path).convert("RGB")
+    display = np.array(img.resize((input_size, input_size)))
+
+    tfm = transforms.Compose([
+        transforms.Resize((input_size, input_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=normalize_mean, std=normalize_std),
+    ])
+    tensor = tfm(img).unsqueeze(0)
+    return display, tensor
+
+
+def _overlay_heatmap(image_rgb: np.ndarray, heatmap: np.ndarray,
+                     alpha: float = 0.45) -> np.ndarray:
+    """Overlay a [0,1] heatmap on an RGB image (uint8)."""
+    import matplotlib.cm as cm
+    colored = (cm.jet(heatmap)[:, :, :3] * 255).astype(np.uint8)
+    blended = (image_rgb * (1 - alpha) + colored * alpha).clip(0, 255).astype(np.uint8)
+    return blended
+
+
+def plot_gradcam_grid(
+    model,
+    class_sample_paths: Dict[str, str],   # {class_name: image_path}
+    class_names: List[str],
+    input_size: int = 224,
+    normalize_mean: tuple = (0.485, 0.456, 0.406),
+    normalize_std: tuple = (0.229, 0.224, 0.225),
+    save_path: Optional[str] = None,
+    device=None,
+):
+    """Generate GradCAM for one sample per class and save as a grid figure.
+
+    Each column = one class: original image | GradCAM overlay.
+    This matches the typical Fig. in agricultural Q1 papers.
     """
     if not HAS_MPL:
         return
 
-    visual_layers = features.get("visual_layers", [])
-    if not visual_layers:
-        return
+    import torch
 
-    n_layers = len(visual_layers)
-    max_receptors = max(len(vl) for vl in visual_layers)
+    if device is None:
+        device = next(model.parameters()).device
 
-    fig, axes = plt.subplots(n_layers, max_receptors,
-                             figsize=(4 * max_receptors, 3 * n_layers))
-    if n_layers == 1:
-        axes = axes.reshape(1, -1)
-    if max_receptors == 1:
-        axes = axes.reshape(-1, 1)
+    cam_engine = GradCAM(model)
+    n = len(class_names)
+    fig, axes = plt.subplots(2, n, figsize=(3 * n, 6))
+    if n == 1:
+        axes = axes.reshape(2, 1)
 
-    fig.suptitle(f"Visual Receptor Outputs - {class_name}", fontsize=14)
+    fig.suptitle("GradCAM — Last Conv Layer", fontsize=13, y=1.01)
 
-    for i, layer_receptors in enumerate(visual_layers):
-        for j in range(max_receptors):
-            ax = axes[i, j]
-            if j < len(layer_receptors):
-                feat = layer_receptors[j][0].detach().cpu()
-                mean_map = feat.mean(dim=0).numpy()
-                ax.imshow(mean_map, cmap='hot', interpolation='nearest')
-                ax.set_title(f"VL{i+1} VR{j+1}\n({feat.shape[0]}ch)",
-                             fontsize=8)
-            ax.axis('off')
+    for j, cls in enumerate(class_names):
+        img_path = class_sample_paths.get(cls)
+        if img_path is None or not os.path.isfile(img_path):
+            for row in range(2):
+                axes[row, j].axis("off")
+                axes[row, j].set_title(f"{cls}\n(no sample)", fontsize=8)
+            continue
 
+        display, tensor = _load_image_tensor(
+            img_path, input_size, normalize_mean, normalize_std)
+        tensor = tensor.to(device)
+
+        with torch.enable_grad():
+            heatmap, pred_idx = cam_engine(tensor)
+
+        pred_name = class_names[pred_idx] if pred_idx < len(class_names) else str(pred_idx)
+        overlay = _overlay_heatmap(display, heatmap)
+
+        # Row 0: original
+        axes[0, j].imshow(display)
+        axes[0, j].set_title(f"{cls}", fontsize=9, fontweight="bold")
+        axes[0, j].axis("off")
+
+        # Row 1: GradCAM overlay
+        axes[1, j].imshow(overlay)
+        color = "green" if pred_name == cls else "red"
+        axes[1, j].set_title(f"pred: {pred_name}", fontsize=8, color=color)
+        axes[1, j].axis("off")
+
+    cam_engine.remove_hooks()
     plt.tight_layout()
+
     if save_path:
         _ensure_dir(os.path.dirname(save_path))
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"  Saved detailed feature map: {save_path}")
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"  Saved GradCAM grid: {save_path}")
     plt.close()
+
+
+def _pick_samples(data_root: str, class_names: List[str],
+                  n_per_class: int = 1) -> Dict[str, List[str]]:
+    """Pick up to n_per_class image paths per class from data_root."""
+    EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    result: Dict[str, List[str]] = {}
+    for cls in class_names:
+        cls_dir = Path(data_root) / cls
+        if not cls_dir.is_dir():
+            result[cls] = []
+            continue
+        imgs = sorted([p for p in cls_dir.iterdir()
+                       if p.suffix.lower() in EXTS])[:n_per_class]
+        result[cls] = [str(p) for p in imgs]
+    return result
 
 
 # ===========================================================================
@@ -140,10 +260,8 @@ def plot_confusion_matrix(cm: np.ndarray, class_names: List[str],
                           save_path: Optional[str] = None,
                           title: str = "Confusion Matrix",
                           normalize: bool = False):
-    """Plot confusion matrix as heatmap."""
     if not HAS_MPL:
         return
-
     if normalize:
         cm_plot = cm.astype(float) / (cm.sum(axis=1, keepdims=True) + 1e-6) * 100
         fmt = ".1f"
@@ -155,18 +273,10 @@ def plot_confusion_matrix(cm: np.ndarray, class_names: List[str],
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(cm_plot, interpolation='nearest', cmap='Blues')
     ax.figure.colorbar(im, ax=ax)
-
-    ax.set(xticks=range(len(class_names)),
-           yticks=range(len(class_names)),
-           xticklabels=class_names,
-           yticklabels=class_names,
-           title=title,
-           ylabel='True Label',
-           xlabel='Predicted Label')
-
+    ax.set(xticks=range(len(class_names)), yticks=range(len(class_names)),
+           xticklabels=class_names, yticklabels=class_names,
+           title=title, ylabel='True Label', xlabel='Predicted Label')
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
-
-    # Text annotations
     thresh = cm_plot.max() / 2.0
     for i in range(len(class_names)):
         for j in range(len(class_names)):
@@ -174,7 +284,6 @@ def plot_confusion_matrix(cm: np.ndarray, class_names: List[str],
             text = f"{val:{fmt}}" if isinstance(val, float) else f"{val}"
             ax.text(j, i, text, ha="center", va="center",
                     color="white" if val > thresh else "black", fontsize=10)
-
     plt.tight_layout()
     if save_path:
         _ensure_dir(os.path.dirname(save_path))
@@ -189,53 +298,35 @@ def plot_confusion_matrix(cm: np.ndarray, class_names: List[str],
 
 def plot_training_curves(history: Dict[str, List[float]],
                          save_path: Optional[str] = None):
-    """Plot loss and accuracy curves over training.
-
-    Args:
-        history: dict with keys like 'train_loss', 'val_loss',
-                 'train_acc', 'val_acc', 'lr'
-    """
     if not HAS_MPL:
         return
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4))
 
-    # Loss
     ax = axes[0]
     if "train_loss" in history:
         ax.plot(history["train_loss"], label="Train", alpha=0.8)
     if "val_loss" in history:
         ax.plot(history["val_loss"], label="Val", alpha=0.8)
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
-    ax.set_title("Loss")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel("Epoch"); ax.set_ylabel("Loss"); ax.set_title("Loss")
+    ax.legend(); ax.grid(True, alpha=0.3)
 
-    # Accuracy / Error Rate
     ax = axes[1]
     if "train_acc" in history:
         ax.plot(history["train_acc"], label="Train Acc", alpha=0.8)
     if "val_acc" in history:
         ax.plot(history["val_acc"], label="Val Acc", alpha=0.8)
     if "val_error" in history:
-        ax.plot(history["val_error"], label="Val Error", alpha=0.8,
-                linestyle='--')
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("%")
-    ax.set_title("Accuracy / Error")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+        ax.plot(history["val_error"], label="Val Error", alpha=0.8, linestyle='--')
+    ax.set_xlabel("Epoch"); ax.set_ylabel("%"); ax.set_title("Accuracy / Error")
+    ax.legend(); ax.grid(True, alpha=0.3)
 
-    # Learning Rate
     ax = axes[2]
     if "lr" in history:
         ax.plot(history["lr"], color='green', alpha=0.8)
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("LR")
+        ax.set_xlabel("Epoch"); ax.set_ylabel("LR")
         ax.set_title("Learning Rate Schedule")
-        ax.set_yscale('log')
-        ax.grid(True, alpha=0.3)
+        ax.set_yscale('log'); ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     if save_path:
@@ -252,35 +343,23 @@ def plot_training_curves(history: Dict[str, List[float]],
 def plot_per_class_metrics(per_class: Dict[str, Dict[str, float]],
                            save_path: Optional[str] = None,
                            title: str = "Per-Class Metrics"):
-    """Bar chart of precision, recall, F1 per class (paper Table 4 style)."""
     if not HAS_MPL:
         return
-
     classes = list(per_class.keys())
     precision = [per_class[c]["precision"] for c in classes]
     recall = [per_class[c]["recall"] for c in classes]
     f1 = [per_class[c]["f1"] for c in classes]
-
     x = np.arange(len(classes))
     width = 0.25
-
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.bar(x - width, recall, width, label='Recall', color='#2196F3')
     ax.bar(x, precision, width, label='Precision', color='#FF9800')
     ax.bar(x + width, f1, width, label='F1', color='#4CAF50')
-
-    ax.set_ylabel('Score (%)')
-    ax.set_title(title)
-    ax.set_xticks(x)
-    ax.set_xticklabels(classes)
-    ax.legend()
-    ax.set_ylim(0, 105)
-    ax.grid(axis='y', alpha=0.3)
-
-    # Value labels
+    ax.set_ylabel('Score (%)'); ax.set_title(title)
+    ax.set_xticks(x); ax.set_xticklabels(classes)
+    ax.legend(); ax.set_ylim(0, 105); ax.grid(axis='y', alpha=0.3)
     for bars in ax.containers:
         ax.bar_label(bars, fmt='%.1f', fontsize=7, padding=2)
-
     plt.tight_layout()
     if save_path:
         _ensure_dir(os.path.dirname(save_path))
@@ -290,30 +369,214 @@ def plot_per_class_metrics(per_class: Dict[str, Dict[str, float]],
 
 
 # ===========================================================================
+# Feature Maps
+# ===========================================================================
+
+def plot_feature_maps(features: Dict, class_name: str = "",
+                      save_path: Optional[str] = None, max_channels: int = 16):
+    if not HAS_MPL:
+        return
+    stages = []
+    if "shallow" in features:
+        stages.append(("Shallow Output", features["shallow"]))
+    if "visual_layers" in features:
+        for i, layer_receptors in enumerate(features["visual_layers"]):
+            for j, receptor_out in enumerate(layer_receptors):
+                stages.append((f"VL{i+1} VR{j+1}", receptor_out))
+    if not stages:
+        return
+    n_stages = len(stages)
+    fig, axes = plt.subplots(1, n_stages, figsize=(3 * n_stages, 3))
+    if n_stages == 1:
+        axes = [axes]
+    fig.suptitle(f"Feature Maps - {class_name}", fontsize=14, y=1.02)
+    for ax, (name, feat) in zip(axes, stages):
+        feat_map = feat[0].detach().cpu() if feat.dim() == 4 else feat.detach().cpu()
+        mean_map = feat_map[:max_channels].mean(dim=0).numpy()
+        ax.imshow(mean_map, cmap='hot', interpolation='nearest')
+        ax.set_title(name, fontsize=8); ax.axis('off')
+    plt.tight_layout()
+    if save_path:
+        _ensure_dir(os.path.dirname(save_path))
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved feature map: {save_path}")
+    plt.close()
+
+
+def plot_feature_maps_detailed(features: Dict, class_name: str = "",
+                                save_path: Optional[str] = None):
+    if not HAS_MPL:
+        return
+    visual_layers = features.get("visual_layers", [])
+    if not visual_layers:
+        return
+    n_layers = len(visual_layers)
+    max_receptors = max(len(vl) for vl in visual_layers)
+    fig, axes = plt.subplots(n_layers, max_receptors,
+                             figsize=(4 * max_receptors, 3 * n_layers))
+    if n_layers == 1:
+        axes = axes.reshape(1, -1)
+    if max_receptors == 1:
+        axes = axes.reshape(-1, 1)
+    fig.suptitle(f"Visual Receptor Outputs - {class_name}", fontsize=14)
+    for i, layer_receptors in enumerate(visual_layers):
+        for j in range(max_receptors):
+            ax = axes[i, j]
+            if j < len(layer_receptors):
+                feat = layer_receptors[j][0].detach().cpu()
+                ax.imshow(feat.mean(dim=0).numpy(), cmap='hot', interpolation='nearest')
+                ax.set_title(f"VL{i+1} VR{j+1}\n({feat.shape[0]}ch)", fontsize=8)
+            ax.axis('off')
+    plt.tight_layout()
+    if save_path:
+        _ensure_dir(os.path.dirname(save_path))
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"  Saved detailed feature map: {save_path}")
+    plt.close()
+
+
+# ===========================================================================
 # SE Attention Weights
 # ===========================================================================
 
 def plot_attention_weights(attn_a: np.ndarray, attn_b: np.ndarray,
                            save_path: Optional[str] = None):
-    """Visualize SE attention weights from both attention layers."""
     if not HAS_MPL:
         return
-
     fig, axes = plt.subplots(1, 2, figsize=(12, 3))
-
     axes[0].bar(range(len(attn_a)), attn_a, color='#2196F3', alpha=0.7)
     axes[0].set_title("Attention Layer A Weights")
-    axes[0].set_xlabel("Channel")
-    axes[0].set_ylabel("Weight")
-
+    axes[0].set_xlabel("Channel"); axes[0].set_ylabel("Weight")
     axes[1].bar(range(len(attn_b)), attn_b, color='#FF9800', alpha=0.7)
     axes[1].set_title("Attention Layer B Weights")
-    axes[1].set_xlabel("Channel")
-    axes[1].set_ylabel("Weight")
-
+    axes[1].set_xlabel("Channel"); axes[1].set_ylabel("Weight")
     plt.tight_layout()
     if save_path:
         _ensure_dir(os.path.dirname(save_path))
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"  Saved attention weights: {save_path}")
     plt.close()
+
+
+# ===========================================================================
+# Standalone CLI
+# ===========================================================================
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Generate GradCAM heatmaps from a saved checkpoint.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Example:\n"
+            "  python visualize.py \\\n"
+            "      --weights runs/jujube/mobilenet_v3_small/cross_entropy/seed_1/best.pth \\\n"
+            "      --data-root data/jujube \\\n"
+            "      --output-dir runs/jujube/mobilenet_v3_small/cross_entropy/seed_1/gradcam\n"
+        ),
+    )
+    p.add_argument("--weights", required=True,
+                   help="Path to best.pth checkpoint")
+    p.add_argument("--data-root", required=True,
+                   help="Dataset root with one sub-folder per class")
+    p.add_argument("--class-names", nargs="+", default=None,
+                   help="Override class names (default: read from checkpoint or infer from folders)")
+    p.add_argument("--output-dir", default=None,
+                   help="Where to save figures (default: same dir as checkpoint)")
+    p.add_argument("--input-size", type=int, default=224)
+    p.add_argument("--n-samples", type=int, default=1,
+                   help="Images per class for GradCAM grid (default: 1)")
+    p.add_argument("--device", default="auto")
+    return p.parse_args()
+
+
+def main():
+    import sys
+    import torch
+    sys.path.insert(0, os.path.dirname(__file__))
+    from models import build_model
+
+    args = _parse_args()
+
+    # ── device ──────────────────────────────────────────────────────────
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
+
+    # ── load checkpoint ─────────────────────────────────────────────────
+    ckpt = torch.load(args.weights, map_location=device)
+    cfg = ckpt.get("config", {})
+    model_name = cfg.get("model")
+    num_classes = cfg.get("num_classes")
+
+    if model_name is None or num_classes is None:
+        raise ValueError(
+            "Checkpoint is missing 'config.model' or 'config.num_classes'.\n"
+            "Please specify --class-names and ensure the checkpoint was saved "
+            "by this training script."
+        )
+
+    # ── class names ──────────────────────────────────────────────────────
+    if args.class_names:
+        class_names = args.class_names
+    else:
+        # Infer alphabetically from dataset folder
+        data_root = Path(args.data_root)
+        class_names = sorted([
+            d.name for d in data_root.iterdir() if d.is_dir()
+        ])
+        if len(class_names) != num_classes:
+            raise ValueError(
+                f"Found {len(class_names)} class folders in '{args.data_root}' "
+                f"but checkpoint says num_classes={num_classes}. "
+                f"Use --class-names to specify them explicitly."
+            )
+
+    print(f"\n  Model      : {model_name}")
+    print(f"  Classes    : {class_names}")
+    print(f"  Device     : {device}")
+
+    # ── build & load model ───────────────────────────────────────────────
+    model = build_model(model_name, num_classes).to(device)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+
+    # ── output directory ─────────────────────────────────────────────────
+    out_dir = args.output_dir or str(Path(args.weights).parent / "gradcam")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ── pick samples ─────────────────────────────────────────────────────
+    all_samples = _pick_samples(args.data_root, class_names, n_per_class=args.n_samples)
+
+    # ── GradCAM grid (one sample per class) ──────────────────────────────
+    single_samples = {cls: paths[0] for cls, paths in all_samples.items() if paths}
+    plot_gradcam_grid(
+        model=model,
+        class_sample_paths=single_samples,
+        class_names=class_names,
+        input_size=args.input_size,
+        save_path=os.path.join(out_dir, "gradcam_grid.png"),
+        device=device,
+    )
+
+    # ── per-class multi-sample (if n_samples > 1) ─────────────────────
+    if args.n_samples > 1:
+        for cls, paths in all_samples.items():
+            if not paths:
+                continue
+            for k, img_path in enumerate(paths):
+                single = {cls: img_path}
+                plot_gradcam_grid(
+                    model=model,
+                    class_sample_paths=single,
+                    class_names=class_names,
+                    input_size=args.input_size,
+                    save_path=os.path.join(out_dir, f"gradcam_{cls}_{k+1}.png"),
+                    device=device,
+                )
+
+    print(f"\n  GradCAM figures saved to: {out_dir}")
+
+
+if __name__ == "__main__":
+    main()

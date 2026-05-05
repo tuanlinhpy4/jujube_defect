@@ -14,9 +14,6 @@ lr_scheduler: cosine
 warmup_epochs: 5
 loss:
   name: cross_entropy
-  focal_gamma: 2.0
-  focal_alpha: null
-  label_smoothing: 0.1
 augmentation:
   horizontal_flip: true
   vertical_flip: false

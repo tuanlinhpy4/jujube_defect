@@ -347,18 +347,20 @@ class MvANet(nn.Module):
 
 
 MODEL_CONFIGS = {
-    "mvanet_1_tiny": dict(k0=84, k_list=[18, 24, 30],
-                          t=1.7, a1=1.0, a2=0.8, p=1),
-    "mvanet_1": dict(k0=84, k_list=[96, 138, 192],
-                     t=1.5, a1=0.7, a2=0.6, p=1),
-    "mvanet_2": dict(k0=84, k_list=[96, 138, 192],
-                     t=1.5, a1=0.7, a2=0.6, p=2),
-    "mvanet_3": dict(k0=84, k_list=[96, 138, 192],
-                     t=1.5, a1=0.7, a2=0.6, p=3),
+    "mvanet_opt_1_tiny": dict(k0=84, k_list=[18, 24, 30],
+                              t=1.7, a1=1.0, a2=0.8, p=1),
+    "mvanet_opt_1":      dict(k0=84, k_list=[96, 138, 192],
+                              t=1.5, a1=0.7, a2=0.6, p=1),
+    "mvanet_opt_2":      dict(k0=84, k_list=[96, 138, 192],
+                              t=1.5, a1=0.7, a2=0.6, p=2),
+    "mvanet_opt_3":      dict(k0=84, k_list=[96, 138, 192],
+                              t=1.5, a1=0.7, a2=0.6, p=3),
 }
 
+DEFAULT_VARIANT = "mvanet_opt_3"
 
-def build_model(name: str = "mvanet_3", num_classes: int = 4,
+
+def build_model(name: str = "mvanet_opt_3", num_classes: int = 4,
                 in_channels: int = 3, **overrides) -> MvANet:
     """Build optimized MvANet by variant name."""
 
@@ -370,17 +372,17 @@ def build_model(name: str = "mvanet_3", num_classes: int = 4,
     return MvANet(in_channels=in_channels, num_classes=num_classes, **cfg)
 
 
-def mvanet_1_tiny(num_classes=4, in_channels=3):
-    return build_model("mvanet_1_tiny", num_classes, in_channels)
+def mvanet_opt_1_tiny(num_classes=4, in_channels=3):
+    return build_model("mvanet_opt_1_tiny", num_classes, in_channels)
 
 
-def mvanet_1(num_classes=4, in_channels=3):
-    return build_model("mvanet_1", num_classes, in_channels)
+def mvanet_opt_1(num_classes=4, in_channels=3):
+    return build_model("mvanet_opt_1", num_classes, in_channels)
 
 
-def mvanet_2(num_classes=4, in_channels=3):
-    return build_model("mvanet_2", num_classes, in_channels)
+def mvanet_opt_2(num_classes=4, in_channels=3):
+    return build_model("mvanet_opt_2", num_classes, in_channels)
 
 
-def mvanet_3(num_classes=4, in_channels=3):
-    return build_model("mvanet_3", num_classes, in_channels)
+def mvanet_opt_3(num_classes=4, in_channels=3):
+    return build_model("mvanet_opt_3", num_classes, in_channels)

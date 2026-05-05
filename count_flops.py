@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from models import registry
+from models import build_model, list_archs, list_variants
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,21 +21,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def require_ptflops():
-    """Import optional ptflops after argparse so --help still works."""
-
     try:
         import ptflops
     except ImportError as exc:
-        raise SystemExit(
-            "ptflops is required for this script: "
-            "pip install -r requirements-optional.txt"
-        ) from exc
+        raise SystemExit("ptflops is required: pip install ptflops") from exc
     return ptflops
 
 
 def parse_gmacs(macs_str: str) -> float:
-    """Convert ptflops MAC string to GMACs."""
-
     parts = macs_str.split()
     value = float(parts[0])
     unit = parts[1] if len(parts) > 1 else ""
@@ -48,16 +41,14 @@ def parse_gmacs(macs_str: str) -> float:
     return value / 1_000_000_000.0
 
 
-def analyze(arch_name: str, variants, input_size: int, in_channels: int,
+def analyze(arch_name: str, variants: list, input_size: int, in_channels: int,
             num_classes: int, ptflops_module):
     print(f"\n{'=' * 72}")
     print(f"  {arch_name}")
     print(f"{'=' * 72}")
     results = []
     for name in variants:
-        model = registry.build(
-            arch_name, name, num_classes=num_classes, in_channels=in_channels
-        )
+        model = build_model(name, num_classes=num_classes, in_channels=in_channels)
         model.eval()
         params = sum(p.numel() for p in model.parameters())
 
@@ -70,7 +61,7 @@ def analyze(arch_name: str, variants, input_size: int, in_channels: int,
         gmacs = parse_gmacs(macs_str)
         results.append((name, params, gmacs, macs_str))
         print(
-            f"  {name:<16} params: {params:>10,} "
+            f"  {name:<22} params: {params:>10,} "
             f"({params * 4 / 1024:>8.1f} KB) | "
             f"MACs: {macs_str:<12} GMACs: {gmacs:.4f}"
         )
@@ -80,6 +71,7 @@ def analyze(arch_name: str, variants, input_size: int, in_channels: int,
 def main() -> None:
     args = parse_args()
     ptflops_module = require_ptflops()
+
     print("=" * 72)
     print(
         f"  Model complexity at {args.in_channels}x"
@@ -88,24 +80,28 @@ def main() -> None:
     print("=" * 72)
 
     all_results = {}
-    for arch_name in registry.list_archs():
-        variants = registry.list_variants(arch_name)
+    for arch_name in list_archs():
+        variants = list_variants(arch_name)
         all_results[arch_name] = analyze(
-            arch_name, variants, args.input_size, args.in_channels,
-            args.num_classes, ptflops_module
+            arch_name, variants,
+            args.input_size, args.in_channels, args.num_classes,
+            ptflops_module,
         )
 
     archs = list(all_results.keys())
     if len(archs) >= 2:
         a, b = archs[0], archs[1]
-        print(f"\n{'=' * 72}")
-        print(f"  Parameter comparison: {a} vs {b}")
-        print(f"{'=' * 72}")
-        print(f"  {'Variant':<16} {a + ' params':>14} {b + ' params':>14} {'Change':>10}")
-        print(f"  {'-' * 16} {'-' * 14} {'-' * 14} {'-' * 10}")
-        for (name, pa, _, _), (_, pb, _, _) in zip(all_results[a], all_results[b]):
-            change = f"{(1 - pb / pa) * 100:+.1f}%" if pa else "N/A"
-            print(f"  {name:<16} {pa:>14,} {pb:>14,} {change:>10}")
+        pairs = list(zip(all_results[a], all_results[b]))
+        if pairs:
+            print(f"\n{'=' * 72}")
+            print(f"  Parameter comparison: {a} vs {b}")
+            print(f"{'=' * 72}")
+            print(f"  {'Variant':<22} {'orig params':>12}  "
+                  f"{'Variant':<24} {'opt params':>12}  {'Change':>8}")
+            print(f"  {'-'*22} {'-'*12}  {'-'*24} {'-'*12}  {'-'*8}")
+            for (na, pa, _, _), (nb, pb, _, _) in pairs:
+                change = f"{(1 - pb / pa) * 100:+.1f}%" if pa else "N/A"
+                print(f"  {na:<22} {pa:>12,}  {nb:<24} {pb:>12,}  {change:>8}")
 
 
 if __name__ == "__main__":

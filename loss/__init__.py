@@ -1,12 +1,12 @@
-from importlib import import_module
+from .cross_entropy import build_loss as _build_ce
+
+AVAILABLE = ["cross_entropy"]
 
 
-AVAILABLE = ["cross_entropy", "focal", "label_smoothing"]
-
-
-def build_loss(name, num_classes=None, loss_cfg=None):
-    if name not in AVAILABLE:
-        raise ValueError(f"Loss '{name}' not found. Available: {AVAILABLE}")
+def build_loss(name: str = "cross_entropy", num_classes=None, loss_cfg=None):
+    if name != "cross_entropy":
+        raise ValueError(
+            f"Loss '{name}' not supported. Only 'cross_entropy' is available."
+        )
     cfg = loss_cfg or {}
-    mod = import_module(f"loss.{name}")
-    return mod.build_loss(num_classes=num_classes, **cfg)
+    return _build_ce(num_classes=num_classes, **cfg)

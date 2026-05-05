@@ -8,7 +8,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from data import create_dataloaders
+from download_data import ensure_dataset
 from loss import build_loss
 from models import build_model, list_models, model_params_M
 from utils import (
@@ -40,16 +41,16 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python train.py --dataset jujube --model mobilenet_v3_small --loss cross_entropy --seed 1\n"
-            "  python train.py --dataset jujube_ours --model efficientnet_b0 --loss focal --seed 1 2 3 4 5\n"
-            "  python train.py --dataset jujube --model resnet18 --loss label_smoothing --seed 1 2 3\n"
+            "  python train.py --dataset jujube --model mobilenet_v3_small --seed 1\n"
+            "  python train.py --dataset jujube_ours --model efficientnet_b0 --seed 1 2 3 4 5\n"
+            "  python train.py --dataset jujube --model resnet18 --seed 1 2 3\n"
         ),
     )
     p.add_argument("--dataset", required=True, choices=list(DATASET_CONFIGS.keys()))
     p.add_argument("--model", required=True,
                    help=f"Model name. Available: {list_models()}")
     p.add_argument("--loss", default="cross_entropy",
-                   choices=["cross_entropy", "focal", "label_smoothing"])
+                   choices=["cross_entropy"])
     p.add_argument("--seed", type=int, nargs="+", required=True,
                    help="One or more training seeds (e.g. --seed 1 2 3 4 5)")
     p.add_argument("--data-root", type=str, default=None)
@@ -137,13 +138,13 @@ def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
         loss.backward()
         optimizer.step()
         preds = outputs.argmax(dim=1)
-        tracker.update(preds, labels, float(loss.item()), len(labels))
+        tracker.update(preds, labels, float(loss.item()), len(labels), logits=outputs)
     return tracker.summary()
 
 
 @torch.no_grad()
 def evaluate(model: nn.Module, loader, criterion, device: torch.device,
-             num_classes: int, class_names: List[str]) -> Dict:
+             num_classes: int, class_names: List[str]) -> Tuple[Dict, MetricTracker]:
     model.eval()
     tracker = MetricTracker(num_classes, class_names)
     for images, labels in loader:
@@ -151,7 +152,7 @@ def evaluate(model: nn.Module, loader, criterion, device: torch.device,
         outputs = model(images)
         loss = criterion(outputs, labels)
         preds = outputs.argmax(dim=1)
-        tracker.update(preds, labels, float(loss.item()), len(labels))
+        tracker.update(preds, labels, float(loss.item()), len(labels), logits=outputs)
     return tracker.summary(), tracker
 
 
@@ -344,6 +345,25 @@ def print_efficiency_report(eff: Dict) -> None:
 # Model info / training helpers
 # ---------------------------------------------------------------------------
 
+def compute_class_weights(loader, num_classes: int,
+                          device: torch.device) -> torch.Tensor:
+    """Compute inverse-frequency class weights from a DataLoader.
+
+    w_c = N / (C * n_c)   — standard sklearn convention.
+    Classes with zero samples get weight 0 to avoid division by zero.
+    """
+    counts = torch.zeros(num_classes, dtype=torch.float32)
+    for _, labels in loader:
+        for c in range(num_classes):
+            counts[c] += (labels == c).sum().item()
+    total = counts.sum()
+    weights = torch.zeros(num_classes, dtype=torch.float32)
+    nonzero = counts > 0
+    weights[nonzero] = total / (num_classes * counts[nonzero])
+    print(f"  Class weights: {weights.tolist()}")
+    return weights.to(device)
+
+
 def print_model_info(model_name: str, model: nn.Module, cfg: Dict):
     params = count_parameters(model)
     print(f"\n  Model     : {model_name}")
@@ -353,9 +373,10 @@ def print_model_info(model_name: str, model: nn.Module, cfg: Dict):
 
 
 def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
-             device: torch.device) -> Dict:
+             device: torch.device,
+             class_weights: Optional[torch.Tensor] = None) -> Dict:
     num_classes = cfg["num_classes"]
-    class_names = cfg["class_names"]
+    class_names = loaders["class_names"]   # alphabetical from ImageFolder — matches label indices
     epochs = cfg["epochs"]
     input_size = cfg["input_size"]
     in_channels = cfg.get("in_channels", 3)
@@ -371,15 +392,18 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
 
     seed_everything(seed)
 
-    model = build_model(args.model, num_classes).to(device)
+    in_channels = cfg.get("in_channels", 3)
+    model = build_model(args.model, num_classes, in_channels=in_channels).to(device)
 
     if seed == args.seed[0]:
         print_model_info(args.model, model, cfg)
 
     loss_cfg = cfg.get("loss", {})
     loss_cfg_clean = {k: v for k, v in loss_cfg.items() if k != "name"}
-    criterion = build_loss(args.loss, num_classes=num_classes,
-                           loss_cfg=loss_cfg_clean)
+    if class_weights is not None:
+        loss_cfg_clean["class_weights"] = class_weights
+    criterion = build_loss("cross_entropy", num_classes=num_classes,
+                           loss_cfg=loss_cfg_clean).to(device)
 
     optimizer = build_optimizer(model, cfg)
     scheduler = build_scheduler(optimizer, cfg, epochs)
@@ -509,6 +533,9 @@ def main():
     print(f"  Split   : 70/15/15 (seed={SPLIT_SEED}, fixed)")
     print(f"{'='*65}")
 
+    # Auto-download dataset if missing
+    cfg["data_root"] = ensure_dataset(args.dataset, cfg["data_root"])
+
     print(f"\n  Creating 70/15/15 stratified split (seed={SPLIT_SEED})...")
     loaders = create_dataloaders(cfg, split_seed=SPLIT_SEED)
     sizes = loaders["split_sizes"]
@@ -517,14 +544,22 @@ def main():
     write_json(
         os.path.join("runs", args.dataset, args.model, args.loss,
                      "split_info.json"),
-        {"split_seed": SPLIT_SEED, "sizes": sizes,
-         "class_names": cfg["class_names"]},
+        {
+            "split_seed": SPLIT_SEED,
+            "sizes": sizes,
+            "class_names": loaders["class_names"],   # actual alphabetical order
+        },
     )
+
+    # Compute class weights once from training split (fixed split → same for all seeds)
+    class_weights = compute_class_weights(
+        loaders["train"], cfg["num_classes"], device)
 
     multi_logger = MultiSeedLogger()
 
     for seed in args.seed:
-        test_metrics = run_seed(seed, cfg, loaders, args, device)
+        test_metrics = run_seed(seed, cfg, loaders, args, device,
+                                class_weights=class_weights)
         multi_logger.add(seed, test_metrics)
 
     if len(args.seed) > 1:

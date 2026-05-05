@@ -8,8 +8,6 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-import numpy as np
-
 
 class TrainingLogger:
     def __init__(self, save_dir: str, seed: int):
@@ -50,6 +48,9 @@ class TrainingLogger:
         self.history["val_loss"].append(float(val_metrics.get("loss", 0.0)))
         self.history["val_acc"].append(float(val_metrics.get("accuracy", 0.0)))
         self.history["val_f1"].append(float(val_metrics.get("f1_macro", 0.0)))
+        self.history["val_error"].append(round(100.0 - float(val_metrics.get("accuracy", 0.0)), 4))
+        if "auc_macro" in val_metrics:
+            self.history["val_auc"].append(float(val_metrics["auc_macro"]))
         self.history["lr"].append(float(lr))
         self.history["epoch_time_s"].append(round(epoch_time, 2))
 
@@ -93,7 +94,8 @@ class MultiSeedLogger:
         if not self.runs:
             return {}
         keys = ["accuracy", "f1_macro", "precision_macro", "recall_macro",
-                "f1_weighted", "precision_weighted", "recall_weighted"]
+                "f1_weighted", "precision_weighted", "recall_weighted",
+                "kappa", "mcc", "auc_macro"]
         result = {"num_seeds": len(self.runs), "seeds": [r["seed"] for r in self.runs]}
         for k in keys:
             vals = np.array([r[k] for r in self.runs if k in r], dtype=float)

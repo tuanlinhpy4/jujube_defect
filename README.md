@@ -10,7 +10,13 @@ Targets reproducible A\*/Q1 reporting: fixed 70/15/15 stratified split, 5-seed p
 | `jujube` | niaozhuo, meibian, liekou, haozao, gantiao, bianxing (6) | 42 |
 | `jujube_ours` | dry, insect_damaged, cracked, mold, invalid (5) | 42 |
 
-Place datasets at `data/jujube/` and `data/jujube_ours/` as flat class folders:
+Datasets are **auto-downloaded** on first run. To download manually:
+```bash
+python download_data.py                   # both datasets
+python download_data.py --dataset jujube
+```
+
+Or place datasets manually at `data/jujube/` and `data/jujube_ours/` as flat class folders:
 ```
 data/jujube/
   niaozhuo/  meibian/  liekou/  haozao/  gantiao/  bianxing/
@@ -32,32 +38,54 @@ One file per model family under `models/`. All use ImageNet pretrained weights.
 | `squeezenet1_0` | 1.25 | SqueezeNet |
 | `resnet18` | 11.69 | ResNet |
 
-## Loss Functions
+## Loss
 
-| Loss | File |
-|------|------|
-| `cross_entropy` | `loss/cross_entropy.py` |
-| `focal` | `loss/focal.py` |
-| `label_smoothing` | `loss/label_smoothing.py` |
+Cross-entropy with **inverse-frequency class weights** (auto-computed from training split):
+
+```
+w_c = N / (C × n_c)
+```
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
+pip install gdown   # for auto-download
 ```
 
 ## Training
 
 ```bash
-python train.py --dataset jujube --model mobilenet_v3_small --loss cross_entropy --seed 1
+python train.py --dataset jujube --model mobilenet_v3_small --seed 1
 
-python train.py --dataset jujube_ours --model efficientnet_b0 --loss focal --seed 1 2 3 4 5
+python train.py --dataset jujube_ours --model efficientnet_b0 --seed 1 2 3 4 5
 
-python train.py --dataset jujube --model resnet18 --loss label_smoothing --seed 1 2 3
+python train.py --dataset jujube --model resnet18 --seed 1 2 3
 ```
 
 `--seed` accepts any number of values. Each seed is run sequentially.  
-After all seeds complete, mean ± std is printed and saved to `runs/<dataset>/<model>/<loss>/summary.json`.
+After all seeds complete, mean ± std is printed and saved to `runs/<dataset>/<model>/cross_entropy/summary.json`.
+
+## GradCAM Visualization
+
+Run after training to generate heatmap figures for the paper:
+
+```bash
+python visualize.py \
+    --weights runs/jujube/mobilenet_v3_small/cross_entropy/seed_1/best.pth \
+    --data-root data/jujube \
+    --output-dir runs/jujube/mobilenet_v3_small/cross_entropy/seed_1/gradcam
+
+# Multiple samples per class
+python visualize.py \
+    --weights runs/jujube/resnet18/cross_entropy/seed_1/best.pth \
+    --data-root data/jujube \
+    --n-samples 3 \
+    --output-dir runs/jujube/resnet18/cross_entropy/seed_1/gradcam
+```
+
+Output: `gradcam_grid.png` — one column per class showing original image and GradCAM overlay.  
+Prediction label shown in **green** (correct) or **red** (wrong).
 
 ## Reproducibility
 
@@ -65,6 +93,7 @@ After all seeds complete, mean ± std is printed and saved to `runs/<dataset>/<m
 - **Training seed**: controls model head initialization and data loading order only.
 - **Pretrained backbone**: fixed ImageNet weights, unaffected by seed.
 - **Deterministic mode**: enabled via `torch.use_deterministic_algorithms`.
+- **Class weights**: computed once from the fixed training split, identical across seeds.
 - Each run saves `best.pth`, `history.json`, `test_results.json`, confusion matrix, training curves.
 
 ## Output Structure
@@ -73,7 +102,7 @@ After all seeds complete, mean ± std is printed and saved to `runs/<dataset>/<m
 runs/
   <dataset>/
     <model>/
-      <loss>/
+      cross_entropy/
         split_info.json
         summary.json          ← mean ± std across seeds
         environment.json
@@ -84,10 +113,23 @@ runs/
           training_curves.png
           confusion_matrix.png
           per_class_metrics.png
+          gradcam/
+            gradcam_grid.png
         seed_2/ ...
 ```
 
 ## Reported Metrics
 
-Test set: Accuracy, Macro-F1, Macro-Precision, Macro-Recall, Weighted-F1.  
-Multi-seed: mean ± std (ddof=1) across all provided seeds.
+Test set (per seed and mean ± std):
+
+| Metric | Description |
+|--------|-------------|
+| Accuracy | Overall correct / total |
+| Macro F1 / P / R | Unweighted average across classes |
+| Weighted F1 / P / R | Support-weighted average |
+| Cohen's κ | Agreement beyond chance (×100) |
+| MCC | Matthews Correlation Coefficient (×100) |
+| AUC-ROC macro | One-vs-rest macro AUC (×100) |
+| AUC-ROC per class | Per-class one-vs-rest AUC |
+
+Multi-seed: mean ± std (ddof=1) for Accuracy, F1, P, R, κ, MCC, AUC-ROC.

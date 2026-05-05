@@ -81,10 +81,17 @@ def create_dataloaders(cfg: dict, split_seed: int = SPLIT_SEED) -> Dict:
     full_aug_tf = datasets.ImageFolder(str(root), transform=train_tf)
     full_eval_tf = datasets.ImageFolder(str(root), transform=eval_tf)
 
+    # actual_classes is sorted alphabetically by ImageFolder — this IS the ground-truth
+    # label order (ImageFolder assigns label 0 to the first alphabetical folder, etc.).
+    # class_names from yaml is used only as a sanity-check, NOT as the label mapping.
     actual_classes = full_aug.classes
     for c in class_names:
         if c not in actual_classes:
             raise ValueError(f"Class '{c}' not found in {root}. Found: {actual_classes}")
+    if set(class_names) != set(actual_classes):
+        raise ValueError(
+            f"yaml class_names {sorted(class_names)} != folders {actual_classes}"
+        )
 
     targets = full_aug.targets
     train_idx, val_idx, test_idx = _stratified_split(targets, seed=split_seed)
@@ -101,7 +108,7 @@ def create_dataloaders(cfg: dict, split_seed: int = SPLIT_SEED) -> Dict:
         "train": DataLoader(train_ds, batch_size=batch_train, shuffle=True, drop_last=False, **loader_kw),
         "val": DataLoader(val_ds, batch_size=batch_eval, shuffle=False, **loader_kw),
         "test": DataLoader(test_ds, batch_size=batch_eval, shuffle=False, **loader_kw),
-        "class_names": class_names,
+        "class_names": actual_classes,   # alphabetical = ImageFolder label order; yaml order is WRONG
         "num_classes": cfg["num_classes"],
         "split_sizes": {"train": len(train_idx), "val": len(val_idx), "test": len(test_idx)},
     }
