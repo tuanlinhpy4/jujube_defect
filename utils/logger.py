@@ -19,7 +19,11 @@ class TrainingLogger:
         self.best_val_loss = float("inf")   # kept for reference / summary only
         self.best_epoch = 0
         self.start_time = time.time()
-        self._epoch_start = time.time()      # per-epoch wall clock
+        self._epoch_start: Optional[float] = None  # set by start_training() right before loop
+
+    def start_training(self) -> None:
+        """Call this immediately before the epoch loop to zero-out setup time."""
+        self._epoch_start = time.time()
 
     def training_summary(self) -> Dict:
         """Return training time stats for inclusion in test_results.json.
@@ -41,8 +45,9 @@ class TrainingLogger:
         }
 
     def log_epoch(self, epoch: int, train_metrics: Dict, val_metrics: Dict, lr: float) -> bool:
-        epoch_time = time.time() - self._epoch_start
-        self._epoch_start = time.time()          # reset for next epoch
+        now = time.time()
+        epoch_time = (now - self._epoch_start) if self._epoch_start is not None else 0.0
+        self._epoch_start = now  # reset for next epoch
 
         self.history["epoch"].append(epoch)
         self.history["train_loss"].append(float(train_metrics.get("loss", 0.0)))

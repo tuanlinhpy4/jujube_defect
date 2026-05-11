@@ -30,8 +30,8 @@ from utils import (
 )
 
 DATASET_CONFIGS = {
-    "jujube": "configs/jujube.yaml",
-    "jujube_ours": "configs/jujube_ours.yaml",
+    "jujube":      str(PROJECT_ROOT / "jujube.yaml"),
+    "jujube_ours": str(PROJECT_ROOT / "jujube_ours.yaml"),
 }
 SPLIT_SEED = 42
 
@@ -276,7 +276,7 @@ def benchmark_inference(
                 times.append((time.perf_counter() - t0) * 1000)
         return times
 
-    # Warmup
+    # Warmup batch-1
     _time_batch(x1, warmup)
 
     # Batch-1 latency
@@ -286,7 +286,10 @@ def benchmark_inference(
     p95_1 = float(np.percentile(times1, 95))
     fps1 = round(1000.0 / mean1, 1) if mean1 > 0 else 0.0
 
-    # Batch-32 throughput (warmup already done)
+    # Warmup batch-32 riêng (GPU memory allocation khác với batch-1)
+    _time_batch(x32, warmup)
+
+    # Batch-32 throughput
     times32 = _time_batch(x32, max(runs // 4, 50))
     mean32 = float(np.mean(times32))
     fps32 = round(32 * 1000.0 / mean32, 1) if mean32 > 0 else 0.0
@@ -363,15 +366,18 @@ def print_efficiency_report(eff: Dict) -> None:
 
 def compute_class_weights(loader, num_classes: int,
                           device: torch.device) -> torch.Tensor:
-    """Compute inverse-frequency class weights from a DataLoader.
+    """Compute inverse-frequency class weights from training subset labels.
 
-    w_c = N / (C * n_c)   — standard sklearn convention.
+    Reads labels directly from the Subset (no DataLoader iteration) so the
+    DataLoader generator state is not advanced before training begins.
+    w_c = N / (C * n_c) — standard sklearn convention.
     Classes with zero samples get weight 0 to avoid division by zero.
     """
+    subset = loader.dataset          # torch.utils.data.Subset
+    targets = [subset.dataset.targets[i] for i in subset.indices]
     counts = torch.zeros(num_classes, dtype=torch.float32)
-    for _, labels in loader:
-        for c in range(num_classes):
-            counts[c] += (labels == c).sum().item()
+    for t in targets:
+        counts[int(t)] += 1
     total = counts.sum()
     weights = torch.zeros(num_classes, dtype=torch.float32)
     nonzero = counts > 0
@@ -388,11 +394,10 @@ def print_model_info(model_name: str, model: nn.Module, cfg: Dict):
     print(f"  Classes   : {cfg['num_classes']} ({cfg['class_names']})")
 
 
-def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
+def run_seed(seed: int, cfg: Dict, args,
              device: torch.device,
              class_weights: Optional[torch.Tensor] = None) -> Dict:
     num_classes = cfg["num_classes"]
-    class_names = loaders["class_names"]   # alphabetical from ImageFolder — matches label indices
     epochs = cfg["epochs"]
     input_size = cfg["input_size"]
     in_channels = cfg.get("in_channels", 3)
@@ -408,7 +413,13 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
 
     seed_everything(seed)
 
-    in_channels = cfg.get("in_channels", 3)
+    # Recreate DataLoaders per seed so the DataLoader generator always starts
+    # from SPLIT_SEED — identical results whether run alone or in a multi-seed
+    # batch. This is what makes --seed 2 reproducible regardless of whether
+    # seeds 1, 3, ... were also run in the same invocation.
+    loaders = create_dataloaders(cfg, split_seed=SPLIT_SEED)
+    class_names = loaders["class_names"]
+
     model = build_model(args.model, num_classes, in_channels=in_channels).to(device)
 
     if seed == args.seed[0]:
@@ -433,6 +444,7 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
     scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
 
     print(f"\n  Training for {epochs} epochs...")
+    logger.start_training()          # reset epoch timer here, excluding model/optimizer setup
     epoch_bar = tqdm(range(1, epochs + 1), desc=f"  Seed {seed}", unit="ep",
                      dynamic_ncols=True, file=sys.stderr)
     for epoch in epoch_bar:
@@ -576,8 +588,8 @@ def main():
     cfg["data_root"] = ensure_dataset(args.dataset, cfg["data_root"])
 
     print(f"\n  Creating 70/15/15 stratified split (seed={SPLIT_SEED})...")
-    loaders = create_dataloaders(cfg, split_seed=SPLIT_SEED)
-    sizes = loaders["split_sizes"]
+    _meta_loaders = create_dataloaders(cfg, split_seed=SPLIT_SEED)
+    sizes = _meta_loaders["split_sizes"]
     print(f"  Train: {sizes['train']} | Val: {sizes['val']} | Test: {sizes['test']}")
 
     write_json(
@@ -586,18 +598,20 @@ def main():
         {
             "split_seed": SPLIT_SEED,
             "sizes": sizes,
-            "class_names": loaders["class_names"],   # actual alphabetical order
+            "class_names": _meta_loaders["class_names"],   # actual alphabetical order
         },
     )
 
-    # Compute class weights once from training split (fixed split → same for all seeds)
+    # Compute class weights once from the fixed split (same for every seed).
+    # Read labels directly from the Subset — no DataLoader iteration so the
+    # generator state is not advanced.
     class_weights = compute_class_weights(
-        loaders["train"], cfg["num_classes"], device)
+        _meta_loaders["train"], cfg["num_classes"], device)
 
     multi_logger = MultiSeedLogger()
 
     for seed in args.seed:
-        test_metrics = run_seed(seed, cfg, loaders, args, device,
+        test_metrics = run_seed(seed, cfg, args, device,
                                 class_weights=class_weights)
         multi_logger.add(seed, test_metrics)
 
