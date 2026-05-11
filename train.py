@@ -427,6 +427,8 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
     logger = TrainingLogger(run_dir, seed)
     best_state = copy.deepcopy(model.state_dict())
     best_val_loss = float("inf")
+    best_val_f1   = -float("inf")   # primary criterion (macro F1)
+    best_val_acc  = 0.0             # accuracy at best-F1 epoch, for result dict
 
     scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
 
@@ -444,21 +446,23 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
         scheduler.step()
         current_lr = optimizer.param_groups[0]["lr"]
         is_best = logger.log_epoch(epoch, train_metrics, val_metrics, current_lr)
-        best_marker = " ★" if is_best else ""
         epoch_bar.set_postfix(
             tr_acc=f"{train_metrics['accuracy']:.1f}%",
-            val_loss=f"{val_metrics['loss']:.4f}",
+            val_f1=f"{val_metrics.get('f1_macro', 0):.1f}%",
             val_acc=f"{val_metrics['accuracy']:.1f}%",
             lr=f"{current_lr:.1e}",
-            best=best_marker,
+            best=" ★" if is_best else "",
             refresh=True,
         )
         if is_best:
-            best_state = copy.deepcopy(model.state_dict())
+            best_state    = copy.deepcopy(model.state_dict())
             best_val_loss = val_metrics["loss"]
+            best_val_f1   = val_metrics.get("f1_macro", 0.0)
+            best_val_acc  = val_metrics["accuracy"]
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": best_state,
+                "val_f1_macro": best_val_f1,
                 "val_loss": best_val_loss,
                 "seed": seed,
                 "config": {
@@ -477,11 +481,13 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
     # Expose training time stats before loading best weights
     train_summary = logger.training_summary()
     print(f"\n  Best epoch       : {train_summary['best_epoch']}  "
-          f"(val loss = {train_summary['best_val_loss']:.6f})")
+          f"(val macro F1 = {train_summary['best_val_f1']:.2f}%  "
+          f"val loss = {train_summary['best_val_loss']:.6f})")
     print(f"  Total train time : {train_summary['total_train_time_min']:.1f} min  "
           f"({train_summary['mean_epoch_time_s']:.1f} s/epoch)")
 
-    print(f"\n  Best val loss: {best_val_loss:.6f} (loaded for test)")
+    print(f"\n  Best val macro F1: {best_val_f1:.2f}%  "
+          f"acc: {best_val_acc:.2f}%  (checkpoint loaded for test)")
     model.load_state_dict(best_state)
 
     # -----------------------------------------------------------------------
@@ -528,7 +534,8 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
     # -----------------------------------------------------------------------
     result = {
         "seed": seed,
-        "best_val_acc": best_val_acc,
+        "best_val_f1": round(best_val_f1, 4),
+        "best_val_acc": round(best_val_acc, 4),
         "training": train_summary,         # best_epoch, total_time, s/epoch
         "test": test_metrics,
         "per_class": test_tracker.per_class_metrics(),

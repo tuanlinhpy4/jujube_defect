@@ -15,7 +15,8 @@ class TrainingLogger:
         self.seed = seed
         os.makedirs(save_dir, exist_ok=True)
         self.history: Dict[str, List[float]] = defaultdict(list)
-        self.best_val_loss = float("inf")
+        self.best_val_f1 = -float("inf")   # criterion: macro F1 (higher = better)
+        self.best_val_loss = float("inf")   # kept for reference / summary only
         self.best_epoch = 0
         self.start_time = time.time()
         self._epoch_start = time.time()      # per-epoch wall clock
@@ -32,6 +33,7 @@ class TrainingLogger:
         mean_epoch_s = float(np.mean(epoch_times)) if epoch_times else 0.0
         return {
             "best_epoch": self.best_epoch,
+            "best_val_f1": round(self.best_val_f1, 4),
             "best_val_loss": round(self.best_val_loss, 6),
             "total_train_time_s": round(total_s, 1),
             "total_train_time_min": round(total_s / 60, 2),
@@ -54,20 +56,25 @@ class TrainingLogger:
         self.history["lr"].append(float(lr))
         self.history["epoch_time_s"].append(round(epoch_time, 2))
 
+        val_f1 = float(val_metrics.get("f1_macro", 0.0))
+        val_acc = float(val_metrics.get("accuracy", 0.0))
         val_loss = float(val_metrics.get("loss", float("inf")))
-        is_best = val_loss < self.best_val_loss
+
+        # Best checkpoint criterion: macro F1 (higher = better, imbalance-aware)
+        is_best = val_f1 > self.best_val_f1
         if is_best:
-            self.best_val_loss = val_loss
+            self.best_val_f1 = val_f1
+            self.best_val_loss = val_loss   # loss at best-F1 epoch, for reference
             self.best_epoch = epoch
 
         elapsed = time.time() - self.start_time
-        marker = " *" if is_best else ""
+        marker = " ★" if is_best else ""
         print(
             f"  [{epoch:3d}] "
-            f"Loss={train_metrics.get('loss',0):.4f} "
-            f"TrainAcc={train_metrics.get('accuracy',0):.2f}% "
+            f"Loss={train_metrics.get('loss', 0):.4f} "
+            f"TrainAcc={train_metrics.get('accuracy', 0):.2f}% "
             f"ValAcc={val_acc:.2f}% "
-            f"ValF1={val_metrics.get('f1_macro',0):.2f}% "
+            f"ValF1={val_f1:.2f}% "
             f"LR={lr:.2e} "
             f"t={elapsed:.0f}s{marker}"
         )
