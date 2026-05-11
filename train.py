@@ -129,21 +129,28 @@ def build_scheduler(optimizer, cfg: Dict, epochs: int):
 def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
                     device: torch.device, num_classes: int,
                     class_names: List[str],
-                    epoch: int = 0, total_epochs: int = 0) -> Dict:
+                    epoch: int = 0, total_epochs: int = 0,
+                    scaler: Optional["torch.cuda.amp.GradScaler"] = None) -> Dict:
     model.train()
     tracker = MetricTracker(num_classes, class_names)
-    
-    # Đã gỡ bỏ tqdm lồng nhau ở đây
+    use_amp = scaler is not None and device.type == "cuda"
+
     for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
         preds = outputs.argmax(dim=1)
         tracker.update(preds, labels, float(loss.item()), len(labels), logits=outputs)
-        
+
     return tracker.summary()
 
 
@@ -419,7 +426,9 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
 
     logger = TrainingLogger(run_dir, seed)
     best_state = copy.deepcopy(model.state_dict())
-    best_val_acc = 0.0
+    best_val_loss = float("inf")
+
+    scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
 
     print(f"\n  Training for {epochs} epochs...")
     epoch_bar = tqdm(range(1, epochs + 1), desc=f"  Seed {seed}", unit="ep",
@@ -428,7 +437,7 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
         train_metrics = train_one_epoch(
             model, loaders["train"], criterion, optimizer,
             device, num_classes, class_names,
-            epoch=epoch, total_epochs=epochs)
+            epoch=epoch, total_epochs=epochs, scaler=scaler)
         val_metrics, _ = evaluate(
             model, loaders["val"], criterion, device, num_classes, class_names,
             desc=f"  Val   {epoch:>3}/{epochs}")
@@ -438,19 +447,19 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
         best_marker = " ★" if is_best else ""
         epoch_bar.set_postfix(
             tr_acc=f"{train_metrics['accuracy']:.1f}%",
-            val_acc=f"{val_metrics['accuracy']:.1f}%",
             val_loss=f"{val_metrics['loss']:.4f}",
+            val_acc=f"{val_metrics['accuracy']:.1f}%",
             lr=f"{current_lr:.1e}",
             best=best_marker,
             refresh=True,
         )
         if is_best:
             best_state = copy.deepcopy(model.state_dict())
-            best_val_acc = val_metrics["accuracy"]
+            best_val_loss = val_metrics["loss"]
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": best_state,
-                "val_acc": best_val_acc,
+                "val_loss": best_val_loss,
                 "seed": seed,
                 "config": {
                     "model": args.model,
@@ -468,11 +477,11 @@ def run_seed(seed: int, cfg: Dict, loaders: Dict, args,
     # Expose training time stats before loading best weights
     train_summary = logger.training_summary()
     print(f"\n  Best epoch       : {train_summary['best_epoch']}  "
-          f"(val acc = {train_summary['best_val_acc']:.2f}%)")
+          f"(val loss = {train_summary['best_val_loss']:.6f})")
     print(f"  Total train time : {train_summary['total_train_time_min']:.1f} min  "
           f"({train_summary['mean_epoch_time_s']:.1f} s/epoch)")
 
-    print(f"\n  Best val accuracy: {best_val_acc:.2f}% (loaded for test)")
+    print(f"\n  Best val loss: {best_val_loss:.6f} (loaded for test)")
     model.load_state_dict(best_state)
 
     # -----------------------------------------------------------------------

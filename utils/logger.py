@@ -15,7 +15,7 @@ class TrainingLogger:
         self.seed = seed
         os.makedirs(save_dir, exist_ok=True)
         self.history: Dict[str, List[float]] = defaultdict(list)
-        self.best_val_acc = 0.0
+        self.best_val_loss = float("inf")
         self.best_epoch = 0
         self.start_time = time.time()
         self._epoch_start = time.time()      # per-epoch wall clock
@@ -32,7 +32,7 @@ class TrainingLogger:
         mean_epoch_s = float(np.mean(epoch_times)) if epoch_times else 0.0
         return {
             "best_epoch": self.best_epoch,
-            "best_val_acc": round(self.best_val_acc, 4),
+            "best_val_loss": round(self.best_val_loss, 6),
             "total_train_time_s": round(total_s, 1),
             "total_train_time_min": round(total_s / 60, 2),
             "mean_epoch_time_s": round(mean_epoch_s, 2),
@@ -54,10 +54,10 @@ class TrainingLogger:
         self.history["lr"].append(float(lr))
         self.history["epoch_time_s"].append(round(epoch_time, 2))
 
-        val_acc = float(val_metrics.get("accuracy", 0.0))
-        is_best = val_acc > self.best_val_acc
+        val_loss = float(val_metrics.get("loss", float("inf")))
+        is_best = val_loss < self.best_val_loss
         if is_best:
-            self.best_val_acc = val_acc
+            self.best_val_loss = val_loss
             self.best_epoch = epoch
 
         elapsed = time.time() - self.start_time
