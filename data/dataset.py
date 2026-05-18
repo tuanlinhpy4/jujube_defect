@@ -60,7 +60,20 @@ def get_eval_transforms(input_size: int, mean: Sequence[float],
     ])
 
 
-def create_dataloaders(cfg: dict, split_seed: int = SPLIT_SEED) -> Dict:
+def create_dataloaders(cfg: dict, split_seed: int = SPLIT_SEED,
+                       loader_seed: Optional[int] = None) -> Dict:
+    """Create train/val/test DataLoaders with a stratified split.
+
+    Args:
+        split_seed: Controls the train/val/test index split — must be the
+            same for every seed so all runs see the same test set.
+        loader_seed: Controls DataLoader shuffle order (batch ordering each
+            epoch). Pass the per-run training seed so each seed explores a
+            different data order, giving honest mean ± std estimates. Defaults
+            to ``split_seed`` for backward compatibility.
+    """
+    if loader_seed is None:
+        loader_seed = split_seed
     root = Path(cfg["data_root"])
     if not root.is_dir():
         raise FileNotFoundError(f"Data root not found: {root}")
@@ -100,7 +113,7 @@ def create_dataloaders(cfg: dict, split_seed: int = SPLIT_SEED) -> Dict:
     val_ds = Subset(full_eval_tf, val_idx)
     test_ds = Subset(full_eval_tf, test_idx)
 
-    gen = make_generator(split_seed)
+    gen = make_generator(loader_seed)
     loader_kw = {"num_workers": num_workers, "pin_memory": True,
                  "worker_init_fn": seed_worker, "generator": gen}
 

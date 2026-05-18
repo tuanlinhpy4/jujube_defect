@@ -30,8 +30,8 @@ from utils import (
 )
 
 DATASET_CONFIGS = {
-    "jujube":      str(PROJECT_ROOT / "jujube.yaml"),
-    "jujube_ours": str(PROJECT_ROOT / "jujube_ours.yaml"),
+    "jujube":      str(PROJECT_ROOT / "configs" / "jujube.yaml"),
+    "jujube_ours": str(PROJECT_ROOT / "configs" / "jujube_ours.yaml"),
 }
 SPLIT_SEED = 42
 
@@ -130,7 +130,7 @@ def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
                     device: torch.device, num_classes: int,
                     class_names: List[str],
                     epoch: int = 0, total_epochs: int = 0,
-                    scaler: Optional["torch.cuda.amp.GradScaler"] = None) -> Dict:
+                    scaler: Optional[torch.amp.GradScaler] = None) -> Dict:
     model.train()
     tracker = MetricTracker(num_classes, class_names)
     use_amp = scaler is not None and device.type == "cuda"
@@ -138,7 +138,7 @@ def train_one_epoch(model: nn.Module, loader, criterion, optimizer,
     for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast("cuda", enabled=use_amp):
             outputs = model(images)
             loss = criterion(outputs, labels)
         if use_amp:
@@ -235,6 +235,7 @@ def benchmark_inference(
     device: Optional[torch.device] = None,
     warmup: int = 50,
     runs: int = 200,
+    use_amp: bool = False,
 ) -> Dict:
     """GPU-T4 inference benchmark following Edge AI paper protocol.
 
@@ -243,15 +244,23 @@ def benchmark_inference(
       - batch1_fps                        — single-image throughput
       - batch32_fps                       — sustained throughput (industrial line)
       - device_name                       — e.g. "Tesla T4"
+      - inference_dtype                   — "fp16 (AMP)" or "fp32"
 
     Protocol matches JujubeNet / Ju-LiteMobileAtt / RJ-TinyViT benchmarks:
     GPU sync before each timing, CUDA events for sub-ms precision on GPU.
+
+    Args:
+        use_amp: Mirror the training precision (AMP fp16 on CUDA). Pass
+            ``device.type == "cuda"`` to match the AMP training regime.
+            T4 Tensor Cores are ~1.5-2x faster on fp16; mismatching this
+            with the training protocol overstates latency and understates FPS.
     """
     if device is None:
         device = next(model.parameters()).device
 
     model.eval()
     use_cuda = device.type == "cuda"
+    _amp_enabled = use_amp and use_cuda
 
     x1 = torch.randn(1, in_channels, input_size, input_size, device=device)
     x32 = torch.randn(32, in_channels, input_size, input_size, device=device)
@@ -263,15 +272,16 @@ def benchmark_inference(
                 start_evt = torch.cuda.Event(enable_timing=True)
                 end_evt = torch.cuda.Event(enable_timing=True)
                 start_evt.record()
-                with torch.no_grad():
-                    model(x)
+                with torch.inference_mode():
+                    with torch.amp.autocast("cuda", enabled=_amp_enabled):
+                        model(x)
                 end_evt.record()
                 torch.cuda.synchronize()
                 times.append(start_evt.elapsed_time(end_evt))
         else:
             for _ in range(n):
                 t0 = time.perf_counter()
-                with torch.no_grad():
+                with torch.inference_mode():
                     model(x)
                 times.append((time.perf_counter() - t0) * 1000)
         return times
@@ -309,8 +319,9 @@ def benchmark_inference(
     if use_cuda:
         try:
             torch.cuda.reset_peak_memory_stats(device)
-            with torch.no_grad():
-                model(x1)
+            with torch.inference_mode():
+                with torch.amp.autocast("cuda", enabled=_amp_enabled):
+                    model(x1)
             torch.cuda.synchronize(device)
             peak_bytes = torch.cuda.max_memory_allocated(device)
             peak_mem_mb = round(peak_bytes / (1024 ** 2), 2)
@@ -322,6 +333,9 @@ def benchmark_inference(
         "input_size": input_size,
         "warmup_iters": warmup,
         "measurement_iters": runs,
+        # Precision used during benchmarking — must match training protocol
+        # (AMP fp16 on CUDA) so latency/FPS claims in the paper are honest.
+        "inference_dtype": "fp16 (AMP)" if _amp_enabled else "fp32",
         "batch1_latency_mean_ms": round(mean1, 3),
         "batch1_latency_std_ms": round(std1, 3),
         "batch1_latency_p95_ms": round(p95_1, 3),
@@ -413,11 +427,10 @@ def run_seed(seed: int, cfg: Dict, args,
 
     seed_everything(seed)
 
-    # Recreate DataLoaders per seed so the DataLoader generator always starts
-    # from SPLIT_SEED — identical results whether run alone or in a multi-seed
-    # batch. This is what makes --seed 2 reproducible regardless of whether
-    # seeds 1, 3, ... were also run in the same invocation.
-    loaders = create_dataloaders(cfg, split_seed=SPLIT_SEED)
+    # split_seed is fixed (SPLIT_SEED=42) so all seeds share the same
+    # train/val/test split.  loader_seed=seed varies per run so batch ordering
+    # differs across seeds — this is what makes std() meaningful.
+    loaders = create_dataloaders(cfg, split_seed=SPLIT_SEED, loader_seed=seed)
     class_names = loaders["class_names"]
 
     model = build_model(args.model, num_classes, in_channels=in_channels).to(device)
@@ -441,7 +454,7 @@ def run_seed(seed: int, cfg: Dict, args,
     best_val_f1   = -float("inf")   # primary criterion (macro F1)
     best_val_acc  = 0.0             # accuracy at best-F1 epoch, for result dict
 
-    scaler = torch.cuda.amp.GradScaler() if device.type == "cuda" else None
+    scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
 
     print(f"\n  Training for {epochs} epochs...")
     logger.start_training()          # reset epoch timer here, excluding model/optimizer setup
@@ -504,9 +517,14 @@ def run_seed(seed: int, cfg: Dict, args,
 
     # -----------------------------------------------------------------------
     # Test evaluation
+    # Use an unweighted CrossEntropyLoss so the reported test loss is
+    # comparable across models and baselines. Class weights are a training
+    # technique; applying them at test time produces a non-standard loss value
+    # that is neither accuracy nor standard CE, confusing paper comparisons.
     # -----------------------------------------------------------------------
+    test_criterion = nn.CrossEntropyLoss().to(device)
     test_metrics, test_tracker = evaluate(
-        model, loaders["test"], criterion, device, num_classes, class_names)
+        model, loaders["test"], test_criterion, device, num_classes, class_names)
     test_tracker.print_report(split=f"Test (seed={seed})")
 
     cm = test_tracker.confusion_matrix()
@@ -537,6 +555,7 @@ def run_seed(seed: int, cfg: Dict, args,
             device=device,
             warmup=args.benchmark_warmup,
             runs=args.benchmark_runs,
+            use_amp=(device.type == "cuda"),   # match AMP training precision
         )
 
     print_efficiency_report(efficiency)

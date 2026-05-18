@@ -1,10 +1,3 @@
-"""Reproducibility helpers used by training, evaluation, and export scripts.
-
-The functions in this module keep all random-number setup in one place. That
-matters for paper code because PyTorch, NumPy, Python's ``random`` module, CUDA,
-and DataLoader workers each have their own source of randomness.
-"""
-
 from __future__ import annotations
 
 import os
@@ -19,17 +12,8 @@ import torch
 
 
 def seed_everything(seed: int, deterministic: bool = True) -> None:
-    """Seed Python, NumPy, PyTorch, CUDA, and deterministic backend switches.
-
-    PyTorch cannot guarantee identical results across different releases,
-    platforms, CPU/GPU backends, or drivers. This function still removes the
-    avoidable randomness inside one fixed environment.
-    """
-
     os.environ["PYTHONHASHSEED"] = str(seed)
     if deterministic:
-        # Required by some CUDA matmul paths when deterministic algorithms are
-        # enabled. It is harmless on CPU-only systems.
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
     random.seed(seed)
@@ -43,38 +27,25 @@ def seed_everything(seed: int, deterministic: bool = True) -> None:
         torch.backends.cudnn.deterministic = deterministic
         torch.backends.cudnn.benchmark = not deterministic
 
-    # warn_only keeps the run alive while still surfacing any nondeterministic
-    # operator PyTorch cannot replace on the current platform.
     try:
-        torch.use_deterministic_algorithms(deterministic, warn_only=True)
+        torch.use_deterministic_algorithms(deterministic, warn_only=False)
     except TypeError:
         torch.use_deterministic_algorithms(deterministic)
 
 
 def seed_worker(worker_id: int) -> None:
-    """Seed one DataLoader worker using PyTorch's worker seed.
-
-    This follows the official PyTorch recommendation: derive NumPy/Python seeds
-    from ``torch.initial_seed()`` so random transforms are reproducible across
-    multi-process workers.
-    """
-
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
 
 def make_generator(seed: int) -> torch.Generator:
-    """Create a seeded torch.Generator for DataLoader shuffling/splitting."""
-
     generator = torch.Generator()
     generator.manual_seed(seed)
     return generator
 
 
 def get_rng_state(train_generator: Optional[torch.Generator] = None) -> Dict[str, Any]:
-    """Capture RNG states needed for deterministic checkpoint resume."""
-
     state: Dict[str, Any] = {
         "python": random.getstate(),
         "numpy": np.random.get_state(),
@@ -89,11 +60,8 @@ def get_rng_state(train_generator: Optional[torch.Generator] = None) -> Dict[str
 
 def set_rng_state(state: Optional[Dict[str, Any]],
                   train_generator: Optional[torch.Generator] = None) -> None:
-    """Restore RNG states saved by ``get_rng_state`` when resuming training."""
-
     if not state:
         return
-
     if "python" in state:
         random.setstate(state["python"])
     if "numpy" in state:
