@@ -2,11 +2,6 @@
 EdgeJuFormer — Lightweight CNN-Token Hybrid Network
 ---------------------------------------------------
 
-Research-level optimized version:
-    - Replaces quadratic self-attention with a MetaFormer-style token mixer
-    - Keeps the original build_model / factory / registry format
-    - Targets lower latency with minimal F1 degradation on edge devices
-
 Designed for:
     - Edge AI
     - Fruit recognition
