@@ -5,8 +5,8 @@ import torch.nn.functional as F
 # ===========================================================================
 # Model Registry Information
 # ===========================================================================
-ARCH_NAME = "se_resnet_custom"
-MODEL_CONFIGS = {"se_resnet_custom": {"input_size": 224, "params_M": None}}
+ARCH_NAME = "se_resnet_bct"
+MODEL_CONFIGS = {"se_resnet_bct": {"input_size": 224, "params_M": None}}
 
 # ===========================================================================
 # SE-ResNet Components
@@ -84,7 +84,7 @@ class SEResNet(nn.Module):
 # ===========================================================================
 # Registration Build Function
 # ===========================================================================
-def build_model(name="se_resnet_custom", num_classes=4, in_channels=3, **kwargs):
+def build_model(name="se_resnet_bct", num_classes=4, in_channels=3, **kwargs):
     model = SEResNet(in_channels=in_channels, num_classes=num_classes)
     model.num_classes = num_classes
     return model
