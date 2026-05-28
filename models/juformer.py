@@ -30,6 +30,21 @@ import torch.nn as nn
 
 
 # ============================================================
+# Registry metadata
+# ============================================================
+
+ARCH_NAME = "juformer"
+
+MODEL_CONFIGS = {
+    "juformer":    {"input_size": 224, "width_mult": 1.00},
+    "juformer_s":  {"input_size": 224, "width_mult": 0.75},
+    "juformer_xs": {"input_size": 224, "width_mult": 0.50},
+}
+
+DEFAULT_VARIANT = "juformer"
+
+
+# ============================================================
 # Utility
 # ============================================================
 
@@ -483,12 +498,50 @@ def edgejuformer_xs(num_classes=4):
 
 
 # ============================================================
+# build_model  (required by model registry)
+# ============================================================
+
+def build_model(name: str = "juformer",
+                num_classes: int = 4,
+                in_channels: int = 3,
+                **kwargs):
+
+    cfg = MODEL_CONFIGS.get(name)
+    if cfg is None:
+        raise ValueError(
+            f"Unknown variant '{name}'. "
+            f"Choose from: {list(MODEL_CONFIGS)}"
+        )
+
+    model = EdgeJuFormer(
+        num_classes=num_classes,
+        width_mult=cfg["width_mult"],
+    )
+
+    if in_channels != 3:
+        # stem[0] is the Conv2d inside _cbr(3, c1, k=3, s=2)
+        old = model.stem[0]
+        model.stem[0] = nn.Conv2d(
+            in_channels,
+            old.out_channels,
+            kernel_size=old.kernel_size,
+            stride=old.stride,
+            padding=old.padding,
+            bias=False
+        )
+
+    model.num_classes = num_classes
+
+    return model
+
+
+# ============================================================
 # Test
 # ============================================================
 
 if __name__ == "__main__":
 
-    model = edgejuformer(num_classes=4)
+    model = build_model(name="juformer", num_classes=4)
 
     x = torch.randn(1, 3, 224, 224)
 
