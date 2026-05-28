@@ -69,6 +69,28 @@ def _cbr(in_ch, out_ch, k=1, s=1, g=1):
 
 
 # ============================================================
+# Deterministic GAP helpers  (replaces AdaptiveAvgPool2d)
+# ============================================================
+
+class _GAPFull(nn.Module):
+    """Global Average Pool → (B, C, 1, 1)  — deterministic."""
+    def forward(self, x):
+        return x.mean(dim=[2, 3], keepdim=True)
+
+
+class _GAPH(nn.Module):
+    """Pool along W only → (B, C, H, 1)  — deterministic."""
+    def forward(self, x):
+        return x.mean(dim=3, keepdim=True)
+
+
+class _GAPW(nn.Module):
+    """Pool along H only → (B, C, 1, W)  — deterministic."""
+    def forward(self, x):
+        return x.mean(dim=2, keepdim=True)
+
+
+# ============================================================
 # DropPath
 # ============================================================
 
@@ -105,8 +127,8 @@ class CoordAttention(nn.Module):
 
         hidden = max(channels // reduction, 8)
 
-        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
-        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        self.pool_h = _GAPH()
+        self.pool_w = _GAPW()
 
         self.conv1 = nn.Conv2d(channels, hidden, 1, bias=False)
         self.bn1 = nn.BatchNorm2d(hidden)
@@ -158,7 +180,7 @@ class DynamicDWConv(nn.Module):
         self.dw5 = _cbr(channels, channels, k=5, g=channels)
 
         self.gate = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
+            _GAPFull(),
             nn.Conv2d(channels, channels // 4, 1),
             nn.ReLU(inplace=True),
             nn.Conv2d(channels // 4, 2, 1)
