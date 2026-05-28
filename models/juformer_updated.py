@@ -2,6 +2,9 @@
 EdgeJuFormer — Lightweight CNN-Token Hybrid Network
 ---------------------------------------------------
 
+Core idea:
+    Local CNN features + lightweight token interaction.
+
 Designed for:
     - Edge AI
     - Fruit recognition
@@ -10,7 +13,7 @@ Designed for:
 
 Main Contributions:
     1. Dynamic local feature extraction (multi-scale DWConv)
-    2. MetaFormer-style cheap token mixing (no self-attention)
+    2. Tiny token mixer for global context
     3. Coordinate attention for spatial awareness
     4. Lightweight hybrid architecture
 
@@ -70,19 +73,19 @@ def _cbr(in_ch, out_ch, k=1, s=1, g=1):
 # ============================================================
 
 class _GAPFull(nn.Module):
-    """Global Average Pool → (B, C, 1, 1) — deterministic."""
+    """Global Average Pool → (B, C, 1, 1)  — deterministic."""
     def forward(self, x):
         return x.mean(dim=[2, 3], keepdim=True)
 
 
 class _GAPH(nn.Module):
-    """Pool along W only → (B, C, H, 1) — deterministic."""
+    """Pool along W only → (B, C, H, 1)  — deterministic."""
     def forward(self, x):
         return x.mean(dim=3, keepdim=True)
 
 
 class _GAPW(nn.Module):
-    """Pool along H only → (B, C, 1, W) — deterministic."""
+    """Pool along H only → (B, C, 1, W)  — deterministic."""
     def forward(self, x):
         return x.mean(dim=2, keepdim=True)
 
@@ -92,15 +95,18 @@ class _GAPW(nn.Module):
 # ============================================================
 
 class DropPath(nn.Module):
+
     def __init__(self, p=0.0):
         super().__init__()
         self.p = p
 
     def forward(self, x):
+
         if self.p == 0.0 or not self.training:
             return x
 
         keep = 1 - self.p
+
         shape = (x.shape[0],) + (1,) * (x.ndim - 1)
 
         mask = torch.bernoulli(
@@ -115,6 +121,7 @@ class DropPath(nn.Module):
 # ============================================================
 
 class CoordAttention(nn.Module):
+
     def __init__(self, channels, reduction=8):
         super().__init__()
 
@@ -132,15 +139,18 @@ class CoordAttention(nn.Module):
         self.conv_w = nn.Conv2d(hidden, channels, 1, bias=False)
 
     def forward(self, x):
+
         n, c, h, w = x.shape
 
         x_h = self.pool_h(x)
         x_w = self.pool_w(x).permute(0, 1, 3, 2)
 
         y = torch.cat([x_h, x_w], dim=2)
+
         y = self.act(self.bn1(self.conv1(y)))
 
         x_h, x_w = torch.split(y, [h, w], dim=2)
+
         x_w = x_w.permute(0, 1, 3, 2)
 
         a_h = torch.sigmoid(self.conv_h(x_h))
@@ -163,6 +173,7 @@ class DynamicDWConv(nn.Module):
     """
 
     def __init__(self, channels):
+
         super().__init__()
 
         self.dw3 = _cbr(channels, channels, k=3, g=channels)
@@ -180,7 +191,9 @@ class DynamicDWConv(nn.Module):
         self.softmax = nn.Softmax(dim=1)
 
     def forward(self, x):
+
         w = self.gate(x)
+
         w = self.softmax(w)
 
         w3 = w[:, 0:1]
@@ -193,33 +206,31 @@ class DynamicDWConv(nn.Module):
 
 
 # ============================================================
-# MetaFormer-style Token Mixer
+# Tiny Token Mixer
 # ============================================================
 
 class TinyTokenMixer(nn.Module):
     """
-    Cheap token mixer for edge deployment.
+    Research-level lightweight token mixer.
 
-    Replaces quadratic self-attention with:
-        - channel-wise normalization
+    Replaces quadratic self-attention with a MetaFormer-style mixer:
+        - normalization
         - depthwise spatial mixing
-        - lightweight pointwise expansion/compression
-        - global gating
+        - pointwise expansion/compression
+        - lightweight global gating
 
-    This keeps the "token interaction" role of the original module
-    while dramatically reducing latency and memory use.
+    This keeps token interaction benefits while reducing latency
+    and memory use on edge devices.
     """
 
     def __init__(self, channels, num_heads=4):
+
         super().__init__()
 
         hidden = max(channels // 2, 8)
 
-        # GroupNorm(1, C) behaves like channel-wise LayerNorm for BCHW
-        # and is stable for small batch sizes.
         self.norm = nn.GroupNorm(1, channels)
 
-        # MetaFormer-style cheap token mixing.
         self.dwconv = nn.Conv2d(
             channels,
             channels,
@@ -239,7 +250,6 @@ class TinyTokenMixer(nn.Module):
         self.pw2 = nn.Conv2d(hidden, channels, 1, bias=False)
         self.pw2bn = nn.BatchNorm2d(channels)
 
-        # Lightweight global gate: keeps some global context without attention.
         self.gate = nn.Sequential(
             _GAPFull(),
             nn.Conv2d(channels, hidden, 1, bias=True),
@@ -249,9 +259,9 @@ class TinyTokenMixer(nn.Module):
         )
 
     def forward(self, x):
-        residual = x
 
         x = self.norm(x)
+
         x = self.dwbn(self.dwconv(x))
         x = self.act(x)
 
@@ -260,11 +270,7 @@ class TinyTokenMixer(nn.Module):
 
         x = self.pw2bn(self.pw2(x))
 
-        # Global reweighting instead of self-attention.
-        x = x * self.gate(x)
-
-        # Pure mixer output; residual is handled by the outer block.
-        return x
+        return x * self.gate(x)
 
 
 # ============================================================
@@ -272,6 +278,7 @@ class TinyTokenMixer(nn.Module):
 # ============================================================
 
 class EdgeJuFormerBlock(nn.Module):
+
     def __init__(
         self,
         in_ch,
@@ -325,13 +332,19 @@ class EdgeJuFormerBlock(nn.Module):
         )
 
     def forward(self, x):
+
         identity = x
 
         x = self.expand(x)
+
         x = self.dynamic_dw(x)
+
         x = self.downsample(x)
+
         x = self.token(x)
+
         x = self.project(x)
+
         x = self.ca(x)
 
         if self.use_res:
@@ -345,6 +358,7 @@ class EdgeJuFormerBlock(nn.Module):
 # ============================================================
 
 class EdgeJuFormer(nn.Module):
+
     def __init__(
         self,
         num_classes=4,
@@ -372,14 +386,16 @@ class EdgeJuFormer(nn.Module):
             use_token=False
         )
 
+        # stage2: keep it CNN-only to reduce latency
         self.stage2 = EdgeJuFormerBlock(
             c2,
             c3,
             stride=2,
-            use_token=True
+            use_token=False
         )
 
         self.stage3 = nn.Sequential(
+
             EdgeJuFormerBlock(
                 c3,
                 c4,
@@ -408,8 +424,11 @@ class EdgeJuFormer(nn.Module):
     # --------------------------------------------------------
 
     def _init_weights(self):
+
         for m in self.modules():
+
             if isinstance(m, nn.Conv2d):
+
                 nn.init.kaiming_normal_(
                     m.weight,
                     mode='fan_out',
@@ -417,10 +436,12 @@ class EdgeJuFormer(nn.Module):
                 )
 
             elif isinstance(m, nn.BatchNorm2d):
+
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
             elif isinstance(m, nn.Linear):
+
                 nn.init.normal_(m.weight, 0, 0.01)
 
                 if m.bias is not None:
@@ -429,18 +450,27 @@ class EdgeJuFormer(nn.Module):
     # --------------------------------------------------------
 
     def forward(self, x):
+
         x = self.stem(x)
+
         x = self.stage1(x)
+
         x = self.stage2(x)
+
         x = self.stage3(x)
+
         x = self.head(x)
+
         x = self.pool(x).flatten(1)
+
         x = self.classifier(x)
+
         return x
 
     # --------------------------------------------------------
 
     def count_parameters(self):
+
         return sum(
             p.numel()
             for p in self.parameters()
@@ -450,6 +480,7 @@ class EdgeJuFormer(nn.Module):
     # --------------------------------------------------------
 
     def forward_features(self, x):
+
         feats = {}
 
         x = self.stem(x)
@@ -472,6 +503,7 @@ class EdgeJuFormer(nn.Module):
     # --------------------------------------------------------
 
     def __repr__(self):
+
         p = self.count_parameters()
 
         return (
@@ -486,6 +518,7 @@ class EdgeJuFormer(nn.Module):
 # ============================================================
 
 def edgejuformer(num_classes=4):
+
     return EdgeJuFormer(
         num_classes=num_classes,
         width_mult=1.0
@@ -493,6 +526,7 @@ def edgejuformer(num_classes=4):
 
 
 def edgejuformer_s(num_classes=4):
+
     return EdgeJuFormer(
         num_classes=num_classes,
         width_mult=0.75
@@ -500,6 +534,7 @@ def edgejuformer_s(num_classes=4):
 
 
 def edgejuformer_xs(num_classes=4):
+
     return EdgeJuFormer(
         num_classes=num_classes,
         width_mult=0.5
@@ -549,10 +584,15 @@ def build_model(name: str = "juformer",
 # ============================================================
 
 if __name__ == "__main__":
+
     model = build_model(name="juformer", num_classes=4)
+
     x = torch.randn(1, 3, 224, 224)
+
     y = model(x)
 
     print(model)
+
     print("Output shape:", y.shape)
+
     print("Parameters:", model.count_parameters())
