@@ -1,4 +1,3 @@
-ile att · PY
 """
 Ju-LiteMobileAtt: A Lightweight Attention Network for Efficient Jujube Defect Classification
 Paper: Zhu X, Dang H, Jin X, Li X (2025). PLoS One 20(12): e0337898.
