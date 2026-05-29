@@ -15,8 +15,15 @@ Architecture Overview:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-ARCH_NAME      = "ju_lite_mobile_att"
-ARCH_ALIASES   = ["julitemobileatt"] 
+ARCH_NAME = "julitemobileatt"
+
+MODEL_CONFIGS = {
+    "ju_lite_mobile_att":    {"input_size": 224, "width_mult": 1.00},
+    "ju_lite_mobie_att_s":  {"input_size": 224, "width_mult": 0.75},
+    "ju_lite_mobile_att_xs": {"input_size": 224, "width_mult": 0.50},
+}
+
+DEFAULT_VARIANT = "ju_lite_mobile_att"
  
 # ─────────────────────────────────────────────────────────────
 # 1. Basic building-block helpers
