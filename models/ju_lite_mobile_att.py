@@ -15,7 +15,8 @@ Architecture Overview:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
- 
+ARCH_NAME      = "ju_lite_mobile_att"
+ARCH_ALIASES   = ["julitemobileatt"] 
  
 # ─────────────────────────────────────────────────────────────
 # 1. Basic building-block helpers
