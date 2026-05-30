@@ -179,11 +179,13 @@ class DynamicDWConv(nn.Module):
         self.dw3 = _cbr(channels, channels, k=3, g=channels)
         self.dw5 = _cbr(channels, channels, k=5, g=channels)
 
+        hidden = max(channels // 4, 8)
+
         self.gate = nn.Sequential(
             _GAPFull(),
-            nn.Conv2d(channels, channels // 4, 1),
+            nn.Conv2d(channels, hidden, 1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(channels // 4, 2, 1)
+            nn.Conv2d(hidden, 2, 1)
         )
 
         self.softmax = nn.Softmax(dim=1)
@@ -209,47 +211,66 @@ class DynamicDWConv(nn.Module):
 
 class TinyTokenMixer(nn.Module):
     """
-    Lightweight global interaction block.
+    Research-level lightweight token mixer.
 
-    CNN feature map
-        -> token projection
-        -> MHSA
-        -> reshape back
+    Replaces quadratic self-attention with a MetaFormer-style mixer:
+        - normalization
+        - depthwise spatial mixing
+        - pointwise expansion/compression
+        - lightweight global gating
+
+    This keeps token interaction benefits while reducing latency
+    and memory use on edge devices.
     """
 
     def __init__(self, channels, num_heads=4):
 
         super().__init__()
 
-        self.norm = nn.LayerNorm(channels)
+        hidden = max(channels // 2, 8)
 
-        self.attn = nn.MultiheadAttention(
-            embed_dim=channels,
-            num_heads=num_heads,
-            batch_first=True
+        self.norm = nn.GroupNorm(1, channels)
+
+        self.dwconv = nn.Conv2d(
+            channels,
+            channels,
+            kernel_size=5,
+            stride=1,
+            padding=2,
+            groups=channels,
+            bias=False
         )
+        self.dwbn = nn.BatchNorm2d(channels)
 
-        self.proj = nn.Linear(channels, channels)
+        self.pw1 = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.pw1bn = nn.BatchNorm2d(hidden)
+
+        self.act = nn.GELU()
+
+        self.pw2 = nn.Conv2d(hidden, channels, 1, bias=False)
+        self.pw2bn = nn.BatchNorm2d(channels)
+
+        self.gate = nn.Sequential(
+            _GAPFull(),
+            nn.Conv2d(channels, hidden, 1, bias=True),
+            nn.GELU(),
+            nn.Conv2d(hidden, channels, 1, bias=True),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
 
-        b, c, h, w = x.shape
+        x = self.norm(x)
 
-        # BCHW -> BNC
-        tokens = x.flatten(2).transpose(1, 2)
+        x = self.dwbn(self.dwconv(x))
+        x = self.act(x)
 
-        tokens = self.norm(tokens)
+        x = self.pw1bn(self.pw1(x))
+        x = self.act(x)
 
-        attn_out, _ = self.attn(tokens, tokens, tokens)
+        x = self.pw2bn(self.pw2(x))
 
-        tokens = tokens + attn_out
-
-        tokens = self.proj(tokens)
-
-        # BNC -> BCHW
-        out = tokens.transpose(1, 2).reshape(b, c, h, w)
-
-        return out
+        return x * self.gate(x)
 
 
 # ============================================================
@@ -365,11 +386,12 @@ class EdgeJuFormer(nn.Module):
             use_token=False
         )
 
+        # stage2: keep it CNN-only to reduce latency
         self.stage2 = EdgeJuFormerBlock(
             c2,
             c3,
             stride=2,
-            use_token=True
+            use_token=False
         )
 
         self.stage3 = nn.Sequential(
