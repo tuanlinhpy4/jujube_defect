@@ -12,14 +12,19 @@ MODEL_CONFIGS = {"se_ghost_resnet": {"input_size": 224, "params_M": None}}
 # Components
 # ===========================================================================
 class GhostModule(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=1, ratio=2, dw_size=3):
+    # Thêm 'padding' vào tham số __init__
+    def __init__(self, in_channels, out_channels, kernel_size=1, padding=0, stride=1, ratio=2, dw_size=3):
         super().__init__()
         init_channels = math.ceil(out_channels / ratio)
         new_channels = init_channels * (ratio - 1)
-        # Primary: Trích xuất đặc trưng cơ bản
-        self.primary_conv = nn.Conv2d(in_channels, init_channels, kernel_size, padding=kernel_size//2, bias=False)
-        # Cheap op: Tạo thêm đặc trưng 'ảo' bằng depthwise conv
-        self.cheap_operation = nn.Conv2d(init_channels, new_channels, dw_size, padding=dw_size//2, groups=init_channels, bias=False)
+        
+        # Truyền padding và stride vào primary_conv
+        self.primary_conv = nn.Conv2d(in_channels, init_channels, kernel_size, 
+                                      padding=padding, stride=stride, bias=False)
+        
+        # Cheap operation thường dùng padding để giữ size, ta để cố định dw_size // 2
+        self.cheap_operation = nn.Conv2d(init_channels, new_channels, dw_size, 
+                                         padding=dw_size//2, groups=init_channels, bias=False)
         self.out_channels = out_channels
 
     def forward(self, x):
