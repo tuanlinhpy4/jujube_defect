@@ -16,7 +16,9 @@ class GhostModule(nn.Module):
         super().__init__()
         init_channels = math.ceil(out_channels / ratio)
         new_channels = init_channels * (ratio - 1)
+        # Primary: Trích xuất đặc trưng cơ bản
         self.primary_conv = nn.Conv2d(in_channels, init_channels, kernel_size, padding=kernel_size//2, bias=False)
+        # Cheap op: Tạo thêm đặc trưng 'ảo' bằng depthwise conv
         self.cheap_operation = nn.Conv2d(init_channels, new_channels, dw_size, padding=dw_size//2, groups=init_channels, bias=False)
         self.out_channels = out_channels
 
@@ -46,24 +48,28 @@ class SEBlock(nn.Module):
 class GhostSEBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
         super().__init__()
-        self.ghost1 = GhostModule(in_channels, out_channels)
+        # Nhánh chính: GhostModule trích xuất đặc trưng hiệu quả
+        self.ghost1 = GhostModule(in_channels, out_channels, kernel_size=3, padding=1, stride=stride)
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
-        self.ghost2 = GhostModule(out_channels, out_channels)
+        self.ghost2 = GhostModule(out_channels, out_channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
         self.se = SEBlock(out_channels)
         
+        # SỬA LỖI: Shortcut bắt buộc phải có stride nếu stride nhánh chính > 1
         self.shortcut = nn.Sequential()
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, 1, stride=stride, bias=False),
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm2d(out_channels)
             )
 
     def forward(self, x):
+        # Forward nhánh chính
         out = self.relu(self.bn1(self.ghost1(x)))
         out = self.bn2(self.ghost2(out))
         out = self.se(out)
+        # Cộng shortcut (đã resize bằng stride)
         out += self.shortcut(x)
         return self.relu(out)
 
@@ -79,6 +85,7 @@ class SEGhostResNet(nn.Module):
             nn.ReLU(inplace=True)
         )
         
+        # Các stage với stride=2 để downsample
         self.stage1 = GhostSEBlock(32, 64, stride=2)
         self.stage2 = GhostSEBlock(64, 128, stride=2)
         self.stage3 = GhostSEBlock(128, 256, stride=2)
@@ -94,8 +101,5 @@ class SEGhostResNet(nn.Module):
         x = self.pool(x).flatten(1)
         return self.classifier(x)
 
-# ===========================================================================
-# Registration Build Function
-# ===========================================================================
 def build_model(name="se_ghost_resnet", num_classes=4, in_channels=3, **kwargs):
     return SEGhostResNet(in_channels=in_channels, num_classes=num_classes)
