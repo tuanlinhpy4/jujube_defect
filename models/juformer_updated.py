@@ -33,7 +33,7 @@ import torch.nn as nn
 # Registry metadata
 # ============================================================
 
-ARCH_NAME = "juformer"
+ARCH_NAME = "juformer_updated"
 
 MODEL_CONFIGS = {
     "juformer":    {"input_size": 224, "width_mult": 1.00},
@@ -41,7 +41,7 @@ MODEL_CONFIGS = {
     "juformer_xs": {"input_size": 224, "width_mult": 0.50},
 }
 
-DEFAULT_VARIANT = "juformer"
+DEFAULT_VARIANT = "juformer_updated"
 
 
 # ============================================================
@@ -545,7 +545,7 @@ def edgejuformer_xs(num_classes=4):
 # build_model  (required by model registry)
 # ============================================================
 
-def build_model(name: str = "juformer",
+def build_model(name: str = "juformer_updated",
                 num_classes: int = 4,
                 in_channels: int = 3,
                 **kwargs):
