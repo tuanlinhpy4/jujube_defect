@@ -510,6 +510,12 @@ def get_transforms(split="train"):
 
 # ─────────────────────────────────────────────────────────────
 # 14. Quick sanity check + latency benchmark
+#
+# Cách đo chuẩn trên GPU:
+#   - Model phải .half() TRƯỚC khi .to(device) nếu dùng fp16
+#   - Warm-up compiled model cần ít nhất 50 runs (graph tracing)
+#   - cuda.synchronize() phải bọc CẢ warm-up lẫn timing
+#   - Đo bằng cuda.Event cho kết quả chính xác hơn perf_counter
 # ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -517,49 +523,93 @@ if __name__ == "__main__":
 
     device      = "cuda" if torch.cuda.is_available() else "cpu"
     CLASS_NAMES = ["Normal", "Wrinkled", "Deformed", "Cracked", "Mold", "Bird-Pecked"]
-    WARMUP, RUNS = 30, 200
+    RUNS = 300
 
-    def latency_ms(model, dummy, runs=RUNS, fp16=False):
-        dtype = torch.float16 if fp16 else torch.float32
-        dummy = dummy.to(dtype)
+    def latency_ms(model, dummy):
+        """
+        Đo latency chuẩn trên GPU dùng cuda.Event.
+        Model và dummy phải đã được cast đúng dtype và đưa lên device
+        trước khi gọi hàm này.
+        Warm-up 50 runs để compiled model hoàn tất graph tracing.
+        """
+        # warm-up — phải đủ nhiều cho torch.compile hoàn tất tracing
         with torch.no_grad():
-            for _ in range(WARMUP):
+            for _ in range(50):
                 model(dummy)
-        if device == "cuda":
-            torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        with torch.no_grad():
-            for _ in range(runs):
-                model(dummy)
-        if device == "cuda":
-            torch.cuda.synchronize()
-        return (time.perf_counter() - t0) / runs * 1000
 
-    dummy = torch.randn(1, 3, 224, 224, device=device)
+        if device == "cuda":
+            # dùng cuda.Event để đo chính xác hơn perf_counter
+            start_evt = torch.cuda.Event(enable_timing=True)
+            end_evt   = torch.cuda.Event(enable_timing=True)
+            torch.cuda.synchronize()
+            start_evt.record()
+            with torch.no_grad():
+                for _ in range(RUNS):
+                    model(dummy)
+            end_evt.record()
+            torch.cuda.synchronize()
+            return start_evt.elapsed_time(end_evt) / RUNS   # ms
+        else:
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                for _ in range(RUNS):
+                    model(dummy)
+            return (time.perf_counter() - t0) / RUNS * 1000
 
-    print(f"Device : {device}")
-    print(f"{'Config':<35} {'Params':>8} {'ms':>8}  Target")
+    dummy_fp32 = torch.randn(1, 3, 224, 224, device=device)
+    dummy_fp16 = dummy_fp32.half()
+
+    print(f"PyTorch : {torch.__version__}")
+    print(f"Device  : {device}")
+    if device == "cuda":
+        print(f"GPU     : {torch.cuda.get_device_name(0)}")
+    print()
+    print(f"{'Config':<36} {'Params':>8} {'ms':>8}  Target")
     print("─" * 62)
 
     configs = [
-        ("micro  fp32  no-compile",  dict(compile=False, fp16=False)),
-        ("micro  fp32  compiled",    dict(compile=True,  fp16=False)),
-        ("micro  fp16  no-compile",  dict(compile=False, fp16=True)),
-        ("micro  fp16  compiled  ←", dict(compile=True,  fp16=True)),
+        # (label, compile, fp16)
+        ("micro  fp32  no-compile",   False, False),
+        ("micro  fp16  no-compile",   False, True),
+        ("micro  fp32  compiled",     True,  False),
+        ("micro  fp16  compiled  ←",  True,  True),   # recommended
     ]
 
-    for label, kw in configs:
-        m = build_model("ju_lite_mobile_att_micro",
-                        num_classes=len(CLASS_NAMES), **kw).to(device).eval()
-        p   = sum(p.numel() for p in m.parameters() if p.requires_grad)
-        ms  = latency_ms(m, dummy, fp16=kw["fp16"])
-        ok  = "✓ <6ms" if ms < 6.0 else "✗"
-        print(f"  {label:<33} {p/1e6:>6.3f}M {ms:>7.2f}  {ok}")
+    for label, use_compile, use_fp16 in configs:
+        # build_model đã xử lý .half() và torch.compile bên trong
+        m = build_model(
+            "ju_lite_mobile_att_micro",
+            num_classes=len(CLASS_NAMES),
+            compile=use_compile,
+            fp16=use_fp16,
+        ).to(device).eval()
+
+        # đếm params từ underlying model (compile wrap không ảnh hưởng)
+        base = m._orig_mod if hasattr(m, "_orig_mod") else m
+        p    = sum(v.numel() for v in base.parameters() if v.requires_grad)
+
+        dummy = dummy_fp16 if use_fp16 else dummy_fp32
+
+        if use_compile:
+            print(f"  {label:<36}  compiling...", end="\r", flush=True)
+
+        ms = latency_ms(m, dummy)
+        ok = "✓ <6ms" if ms < 6.0 else "✗"
+        print(f"  {label:<36} {p/1e6:>6.3f}M {ms:>7.2f}  {ok}")
 
     print()
-    print("Recommended inference code (Colab T4):")
-    print("  model = build_model('ju_lite_mobile_att_micro',")
-    print("                      num_classes=6, compile=True, fp16=True).to('cuda').eval()")
-    print("  x = x.cuda().half()   # cast input to fp16")
+    print("─" * 62)
+    print("Inference code (dùng trong project):")
+    print()
+    print("  # Khởi tạo 1 lần (compile mất ~30-60s lần đầu)")
+    print("  model = build_model(")
+    print("      'ju_lite_mobile_att_micro',")
+    print("      num_classes=6,")
+    print("      compile=True,   # bật kernel fusion")
+    print("      fp16=True,      # bật half precision")
+    print("  ).to('cuda').eval()")
+    print()
+    print("  # Inference (mỗi lần predict)")
+    print("  x = x.cuda().half()            # cast input sang fp16")
     print("  with torch.no_grad():")
     print("      logits = model(x)")
