@@ -1,8 +1,8 @@
 """
-Ablation A1 — w/o DynamicDWConv
-DynamicDWConv replaced with a plain fixed 3×3 DWConv.
-Gate network and 5×5 branch are removed entirely.
-Expected: F1 drop ~2–4pp, latency slightly lower.
+Ablation A3 — w/o CoordAttention (all stages)
+CoordAttention replaced with Identity everywhere.
+_GAPH / _GAPW helpers kept for compatibility.
+Expected: F1 drop ~1–2pp, slight latency gain.
 """
 
 
@@ -138,7 +138,19 @@ class DropPath(nn.Module):
 
 
 # ============================================================
-# Coordinate Attention
+# CoordAttention  [ablation A3: disabled — Identity]
+# ============================================================
+
+class CoordAttention(nn.Module):
+    """Ablation A3 — no CoordAttention. Pass-through Identity."""
+
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+
 # ============================================================
 
 class CoordAttention(nn.Module):
@@ -181,25 +193,7 @@ class CoordAttention(nn.Module):
 
 
 # ============================================================
-# StaticDWConv  [ablation: replaces DynamicDWConv — fixed 3×3 only]
-# ============================================================
-
-class DynamicDWConv(nn.Module):
-    """Ablation A1 — no dynamic kernel selection. Fixed 3×3 DWConv."""
-
-    def __init__(self, channels):
-        super().__init__()
-        self.dw3 = nn.Conv2d(
-            channels, channels, kernel_size=3,
-            padding=1, groups=channels, bias=False
-        )
-        self.bn  = nn.BatchNorm2d(channels)
-        self.act = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        return self.act(self.bn(self.dw3(x)))
-
-
+# Dynamic Multi-Scale Depthwise Conv  [v2: shared BN]
 # ============================================================
 
 class DynamicDWConv(nn.Module):
