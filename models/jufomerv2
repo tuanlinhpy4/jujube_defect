@@ -19,15 +19,15 @@ import torch.nn as nn
 # Registry metadata
 # ============================================================
 
-ARCH_NAME = "juformer"
+ARCH_NAME = "juformerv2"
 
 MODEL_CONFIGS = {
-    "juformer":    {"input_size": 160, "width_mult": 1.00},
-    "juformer_s":  {"input_size": 160, "width_mult": 0.75},
-    "juformer_xs": {"input_size": 160, "width_mult": 0.50},
+    "juformerv2":    {"input_size": 160, "width_mult": 1.00},
+    "juformerv2_s":  {"input_size": 160, "width_mult": 0.75},
+    "juformerv2_xs": {"input_size": 160, "width_mult": 0.50},
 }
 
-DEFAULT_VARIANT = "juformer"
+DEFAULT_VARIANT = "juformerv2"
 
 
 # ============================================================
@@ -591,7 +591,7 @@ class EdgeJuFormer(nn.Module):
 # Factory
 # ============================================================
 
-def edgejuformer(num_classes=4):
+def edgejuformerv2(num_classes=4):
 
     return EdgeJuFormer(
         num_classes=num_classes,
@@ -599,7 +599,7 @@ def edgejuformer(num_classes=4):
     )
 
 
-def edgejuformer_s(num_classes=4):
+def edgejuformerv2_s(num_classes=4):
 
     return EdgeJuFormer(
         num_classes=num_classes,
@@ -607,7 +607,7 @@ def edgejuformer_s(num_classes=4):
     )
 
 
-def edgejuformer_xs(num_classes=4):
+def edgejuformerv2_xs(num_classes=4):
 
     return EdgeJuFormer(
         num_classes=num_classes,
@@ -619,7 +619,7 @@ def edgejuformer_xs(num_classes=4):
 # build_model  (required by model registry)
 # ============================================================
 
-def build_model(name: str = "juformer",
+def build_model(name: str = "juformerv2",
                 num_classes: int = 4,
                 in_channels: int = 3,
                 **kwargs):
@@ -659,7 +659,7 @@ def build_model(name: str = "juformer",
 
 if __name__ == "__main__":
 
-    model = build_model(name="juformer", num_classes=4)
+    model = build_model(name="juformerv2", num_classes=4)
 
     # v3: default input resolution is 160x160
     x = torch.randn(1, 3, 160, 160)
