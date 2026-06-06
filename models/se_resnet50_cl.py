@@ -1,3 +1,4 @@
+import weakref
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -159,13 +160,13 @@ class CombinedLoss(nn.Module):
     def __init__(self, model: "SEResNet50", num_classes: int, feature_dim: int,
                  lambda_c: float = 0.003):
         super().__init__()
-        self.model       = model
+        self._model_ref  = weakref.ref(model)   # weakref tránh vòng lặp đệ quy
         self.ce_loss     = nn.CrossEntropyLoss()
         self.center_loss = CenterLoss(num_classes, feature_dim, lambda_c)
 
     def forward(self, logits: torch.Tensor, labels: torch.Tensor):
         """Signature giống CrossEntropyLoss: criterion(outputs, labels)"""
-        features    = self.model._features          # lấy từ forward pass vừa chạy
+        features    = self._model_ref()._features  # lấy từ forward pass vừa chạy
         loss_ce     = self.ce_loss(logits, labels)
         loss_center = self.center_loss(features, labels)
         return loss_ce + loss_center
