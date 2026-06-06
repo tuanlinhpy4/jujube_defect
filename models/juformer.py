@@ -1,10 +1,21 @@
 """
-Ablation A3 — w/o CoordAttention (all stages)
-CoordAttention replaced with Identity everywhere.
-_GAPH / _GAPW helpers kept for compatibility.
-Expected: F1 drop ~1–2pp, slight latency gain.
-"""
+EdgeJuFormer — với đầy đủ ablation variants
+--------------------------------------------
 
+Thêm vào MODEL_CONFIGS các variant ablation:
+    juformer_a1  — w/o DynamicDWConv  (fixed 3×3 DW)
+    juformer_a2  — w/o TinyTokenMixer (Identity)
+    juformer_a3  — w/o CoordAttention (Identity)
+    juformer_a4  — CNN only           (no Token + no CA)
+    juformer_a5  — Baseline           (fixed DW + no Token + no CA)
+
+Chạy ablation:
+    python train.py --dataset jujube_ours --model juformer_a1 --seed 1
+    python train.py --dataset jujube_ours --model juformer_a2 --seed 1
+    python train.py --dataset jujube_ours --model juformer_a3 --seed 1
+    python train.py --dataset jujube_ours --model juformer_a4 --seed 1
+    python train.py --dataset jujube_ours --model juformer_a5 --seed 1
+"""
 
 from __future__ import annotations
 
@@ -22,47 +33,37 @@ import torch.nn as nn
 ARCH_NAME = "juformer"
 
 MODEL_CONFIGS = {
-    "juformer":    {"input_size": 160, "width_mult": 1.00},
-    "juformer_s":  {"input_size": 160, "width_mult": 0.75},
-    "juformer_xs": {"input_size": 160, "width_mult": 0.50},
+    # ── full model variants ──────────────────────────────────
+    "juformer":    {"input_size": 224, "width_mult": 1.00,
+                    "ablation": None},
+    "juformer_s":  {"input_size": 224, "width_mult": 0.75,
+                    "ablation": None},
+    "juformer_xs": {"input_size": 224, "width_mult": 0.50,
+                    "ablation": None},
+
+    # ── ablation variants ────────────────────────────────────
+    # A1: DynamicDWConv → fixed 3×3 DW  (đo đóng góp multi-scale)
+    "juformer_a1": {"input_size": 224, "width_mult": 1.00,
+                    "ablation": "no_dyndw"},
+
+    # A2: TinyTokenMixer → Identity  (đo đóng góp global context)
+    "juformer_a2": {"input_size": 224, "width_mult": 1.00,
+                    "ablation": "no_token"},
+
+    # A3: CoordAttention → Identity  (đo đóng góp spatial awareness)
+    "juformer_a3": {"input_size": 224, "width_mult": 1.00,
+                    "ablation": "no_ca"},
+
+    # A4: no TokenMixer + no CoordAttn  (pure DynDW CNN)
+    "juformer_a4": {"input_size": 224, "width_mult": 1.00,
+                    "ablation": "cnn_only"},
+
+    # A5: fixed DW + no Token + no CA  (plain inverted-residual floor)
+    "juformer_a5": {"input_size": 224, "width_mult": 1.00,
+                    "ablation": "baseline"},
 }
 
 DEFAULT_VARIANT = "juformer"
-
-
-# ============================================================
-# Recommended training settings (v2)
-# ============================================================
-#
-# AUGMENTATION (train split):
-#   transforms.Compose([
-#       transforms.RandomResizedCrop(160),
-#       transforms.RandomHorizontalFlip(),
-#       transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
-#       transforms.RandAugment(num_ops=2, magnitude=9),
-#       transforms.ToTensor(),
-#       transforms.Normalize(mean, std),
-#       transforms.RandomErasing(p=0.25),
-#   ])
-#
-# LOSS:
-#   criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-#
-# MIXUP (in training loop):
-#   alpha = 0.2
-#   lam = np.random.beta(alpha, alpha)
-#   mixed_x = lam * x + (1 - lam) * x.flip(0)
-#   loss = lam * criterion(out, y) + (1 - lam) * criterion(out, y.flip(0))
-#
-# SCHEDULER:
-#   scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-#       optimizer, T_0=20, T_mult=2
-#   )
-#
-# COMPILE (PyTorch >= 2.0):
-#   model = torch.compile(model, mode="reduce-overhead")
-#
-# ============================================================
 
 
 # ============================================================
@@ -90,7 +91,7 @@ def _cbr(in_ch, out_ch, k=1, s=1, g=1):
 
 
 # ============================================================
-# Deterministic GAP helpers  (replaces AdaptiveAvgPool2d)
+# Deterministic GAP helpers
 # ============================================================
 
 class _GAPFull(nn.Module):
@@ -127,30 +128,15 @@ class DropPath(nn.Module):
             return x
 
         keep = 1 - self.p
-
         shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-
         mask = torch.bernoulli(
             torch.full(shape, keep, device=x.device)
         )
-
         return x * mask / keep
 
 
 # ============================================================
-# CoordAttention  [ablation A3: disabled — Identity]
-# ============================================================
-
-class CoordAttention(nn.Module):
-    """Ablation A3 — no CoordAttention. Pass-through Identity."""
-
-    def __init__(self, channels, reduction=8):
-        super().__init__()
-
-    def forward(self, x):
-        return x
-
-
+# CoordAttention  [full / ablation_no_ca]
 # ============================================================
 
 class CoordAttention(nn.Module):
@@ -165,7 +151,6 @@ class CoordAttention(nn.Module):
 
         self.conv1 = nn.Conv2d(channels, hidden, 1, bias=False)
         self.bn1 = nn.BatchNorm2d(hidden)
-
         self.act = nn.ReLU(inplace=True)
 
         self.conv_h = nn.Conv2d(hidden, channels, 1, bias=False)
@@ -179,11 +164,9 @@ class CoordAttention(nn.Module):
         x_w = self.pool_w(x).permute(0, 1, 3, 2)
 
         y = torch.cat([x_h, x_w], dim=2)
-
         y = self.act(self.bn1(self.conv1(y)))
 
         x_h, x_w = torch.split(y, [h, w], dim=2)
-
         x_w = x_w.permute(0, 1, 3, 2)
 
         a_h = torch.sigmoid(self.conv_h(x_h))
@@ -192,42 +175,30 @@ class CoordAttention(nn.Module):
         return x * a_h * a_w
 
 
+class _IdentityCA(nn.Module):
+    """Ablation A3/A4/A5: CoordAttention replaced with Identity."""
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+
 # ============================================================
-# Dynamic Multi-Scale Depthwise Conv  [v2: shared BN]
+# DynamicDWConv  [full / ablation_no_dyndw]
 # ============================================================
 
 class DynamicDWConv(nn.Module):
     """
     Adaptive receptive field selection.
-
-    Learns dynamic weights between:
-        - 3x3 DWConv
-        - 5x5 DWConv
-
-    v2 change: removed per-branch BN inside _cbr; now uses a
-    single shared BN applied after the weighted sum.  This cuts
-    two BN passes (4 memory round-trips) down to one without
-    losing normalisation — the weighted sum is still a linear
-    combination so a single BN suffices.
+    Learns dynamic weights between 3×3 and 5×5 DWConv.
     """
 
     def __init__(self, channels):
-
         super().__init__()
 
-        # bare Conv (no BN/ReLU) — BN is applied after blending
-        self.dw3 = nn.Conv2d(
-            channels, channels, kernel_size=3,
-            padding=1, groups=channels, bias=False
-        )
-        self.dw5 = nn.Conv2d(
-            channels, channels, kernel_size=5,
-            padding=2, groups=channels, bias=False
-        )
-
-        # single shared BN + activation after blend
-        self.bn  = nn.BatchNorm2d(channels)
-        self.act = nn.ReLU(inplace=True)
+        self.dw3 = _cbr(channels, channels, k=3, g=channels)
+        self.dw5 = _cbr(channels, channels, k=5, g=channels)
 
         hidden = max(channels // 4, 8)
 
@@ -237,70 +208,59 @@ class DynamicDWConv(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden, 2, 1)
         )
-
         self.softmax = nn.Softmax(dim=1)
 
     def forward(self, x):
 
         w = self.softmax(self.gate(x))
-
         w3 = w[:, 0:1]
         w5 = w[:, 1:2]
 
-        blended = w3 * self.dw3(x) + w5 * self.dw5(x)
-
-        return self.act(self.bn(blended))
+        return w3 * self.dw3(x) + w5 * self.dw5(x)
 
 
-# ============================================================
-# FastTokenMixer  [v3: MetaFormer-style, compile-ready]
-# ============================================================
-
-class FastTokenMixer(nn.Module):
-    """
-    Streamlined MetaFormer-style token mixer.
-
-    Design principles vs TinyTokenMixer (v2):
-        - Pre-norm BN only (single normalisation per block)
-        - DWConv handles spatial mixing (no separate BN after DW —
-          the pre-norm already normalises the input)
-        - Pointwise FFN: linear → linear, no mid-path BN or GELU
-          (keeps the graph simple for torch.compile kernel fusion)
-        - Global gate via _GAPFull + sigmoid (channel recalibration)
-        - Residual connection inside the mixer
-
-    Net effect: 3 fewer BN passes and 1 fewer activation per call
-    vs TinyTokenMixer → measurably lower memory bandwidth on GPU.
-    """
+class _StaticDWConv(nn.Module):
+    """Ablation A1/A5: fixed 3×3 DWConv, no dynamic gate."""
 
     def __init__(self, channels):
+        super().__init__()
+        self.dw = _cbr(channels, channels, k=3, g=channels)
 
+    def forward(self, x):
+        return self.dw(x)
+
+
+# ============================================================
+# TinyTokenMixer  [full / ablation_no_token]
+# ============================================================
+
+class TinyTokenMixer(nn.Module):
+    """
+    MetaFormer-style lightweight token mixer.
+    """
+
+    def __init__(self, channels, num_heads=4):
         super().__init__()
 
         hidden = max(channels // 2, 8)
 
-        # pre-norm — single BN, GPU-friendly
-        self.norm = nn.BatchNorm2d(channels)
+        self.norm = nn.GroupNorm(1, channels)
 
-        # spatial mixer: 5×5 DWConv
         self.dwconv = nn.Conv2d(
-            channels,
-            channels,
-            kernel_size=5,
-            stride=1,
-            padding=2,
-            groups=channels,
-            bias=False
+            channels, channels,
+            kernel_size=5, stride=1, padding=2,
+            groups=channels, bias=False
         )
+        self.dwbn = nn.BatchNorm2d(channels)
 
-        # pointwise FFN: compress → expand, no BN between
         self.pw1 = nn.Conv2d(channels, hidden, 1, bias=False)
-        self.pw2 = nn.Conv2d(hidden, channels, 1, bias=False)
-        self.ffn_bn = nn.BatchNorm2d(channels)
+        self.pw1bn = nn.BatchNorm2d(hidden)
 
         self.act = nn.GELU()
 
-        # channel gate (global context)
+        self.pw2 = nn.Conv2d(hidden, channels, 1, bias=False)
+        self.pw2bn = nn.BatchNorm2d(channels)
+
         self.gate = nn.Sequential(
             _GAPFull(),
             nn.Conv2d(channels, hidden, 1, bias=True),
@@ -311,26 +271,21 @@ class FastTokenMixer(nn.Module):
 
     def forward(self, x):
 
-        shortcut = x
-
         x = self.norm(x)
 
-        # spatial mixing
-        x = self.dwconv(x)
+        x = self.dwbn(self.dwconv(x))
         x = self.act(x)
 
-        # pointwise FFN
-        x = self.pw2(self.pw1(x))
-        x = self.ffn_bn(x)
+        x = self.pw1bn(self.pw1(x))
+        x = self.act(x)
 
-        # channel gate
-        x = x * self.gate(x)
+        x = self.pw2bn(self.pw2(x))
 
-        return x + shortcut
+        return x * self.gate(x)
 
 
 # ============================================================
-# Hybrid Block
+# Hybrid Block  — ablation_mode controls which modules are active
 # ============================================================
 
 class EdgeJuFormerBlock(nn.Module):
@@ -342,37 +297,37 @@ class EdgeJuFormerBlock(nn.Module):
         stride=1,
         expand_ratio=4,
         use_token=True,
-        use_ca=True,
-        drop_path=0.0
+        drop_path=0.0,
+        ablation_mode: str | None = None,  # None | "no_dyndw" | "no_token" | "no_ca" | "cnn_only" | "baseline"
     ):
         super().__init__()
 
         hidden = in_ch * expand_ratio
-
         self.use_res = (stride == 1 and in_ch == out_ch)
 
         # expansion
         self.expand = _cbr(in_ch, hidden, k=1)
 
-        # dynamic receptive field
-        self.dynamic_dw = DynamicDWConv(hidden)
+        # ── DynamicDWConv vs StaticDWConv ─────────────────────
+        use_static_dw = ablation_mode in ("no_dyndw", "baseline")
+        self.dynamic_dw = (
+            _StaticDWConv(hidden)
+            if use_static_dw else
+            DynamicDWConv(hidden)
+        )
 
         # downsample
         if stride == 2:
-            self.downsample = _cbr(
-                hidden,
-                hidden,
-                k=3,
-                s=2,
-                g=hidden
-            )
+            self.downsample = _cbr(hidden, hidden, k=3, s=2, g=hidden)
         else:
             self.downsample = nn.Identity()
 
-        # token mixer — v3: FastTokenMixer
+        # ── TinyTokenMixer vs Identity ─────────────────────────
+        disable_token = ablation_mode in ("no_token", "cnn_only", "baseline")
         self.token = (
-            FastTokenMixer(hidden)
-            if use_token else nn.Identity()
+            nn.Identity()
+            if (not use_token or disable_token) else
+            TinyTokenMixer(hidden)
         )
 
         # projection
@@ -381,12 +336,13 @@ class EdgeJuFormerBlock(nn.Module):
             nn.BatchNorm2d(out_ch)
         )
 
-        # v3: CoordAttention optional — disabled at stage1/stage2
-        self.ca = CoordAttention(out_ch) if use_ca else nn.Identity()
+        # ── CoordAttention vs Identity ─────────────────────────
+        disable_ca = ablation_mode in ("no_ca", "cnn_only", "baseline")
+        CA = _IdentityCA if disable_ca else CoordAttention
+        self.ca = CA(out_ch)
 
         self.drop = (
-            DropPath(drop_path)
-            if drop_path > 0 else nn.Identity()
+            DropPath(drop_path) if drop_path > 0 else nn.Identity()
         )
 
     def forward(self, x):
@@ -394,15 +350,10 @@ class EdgeJuFormerBlock(nn.Module):
         identity = x
 
         x = self.expand(x)
-
         x = self.dynamic_dw(x)
-
         x = self.downsample(x)
-
         x = self.token(x)
-
         x = self.project(x)
-
         x = self.ca(x)
 
         if self.use_res:
@@ -412,7 +363,7 @@ class EdgeJuFormerBlock(nn.Module):
 
 
 # ============================================================
-# Model  [v3: 160px, mean pool, 3-block stage3, FastTokenMixer]
+# Model
 # ============================================================
 
 class EdgeJuFormer(nn.Module):
@@ -421,7 +372,8 @@ class EdgeJuFormer(nn.Module):
         self,
         num_classes=4,
         width_mult=1.0,
-        drop_path=0.1
+        drop_path=0.1,
+        ablation_mode: str | None = None,
     ):
         super().__init__()
 
@@ -438,57 +390,31 @@ class EdgeJuFormer(nn.Module):
 
         # stages
         self.stage1 = EdgeJuFormerBlock(
-            c1,
-            c2,
-            stride=2,
-            use_token=False,
-            use_ca=False        # v3: no CoordAttn at early stages
+            c1, c2, stride=2, use_token=False,
+            ablation_mode=ablation_mode
         )
 
-        # stage2: CNN-only, no CoordAttn
         self.stage2 = EdgeJuFormerBlock(
-            c2,
-            c3,
-            stride=2,
-            use_token=False,
-            use_ca=False        # v3: no CoordAttn at early stages
+            c2, c3, stride=2, use_token=False,
+            ablation_mode=ablation_mode
         )
 
-        # v3: 3 blocks in stage3, CoordAttn ON (use_ca default=True)
-        # drop_path increases progressively for regularisation
         self.stage3 = nn.Sequential(
-
             EdgeJuFormerBlock(
-                c3,
-                c4,
-                stride=2,
-                use_token=True
+                c3, c4, stride=2, use_token=True,
+                ablation_mode=ablation_mode
             ),
-
             EdgeJuFormerBlock(
-                c4,
-                c4,
-                stride=1,
-                use_token=True,
-                drop_path=drop_path
-            ),
-
-            # new block — higher drop_path for regularisation
-            EdgeJuFormerBlock(
-                c4,
-                c4,
-                stride=1,
-                use_token=True,
-                drop_path=drop_path * 2
+                c4, c4, stride=1, use_token=True,
+                drop_path=drop_path,
+                ablation_mode=ablation_mode
             )
         )
 
         # head
         self.head = _cbr(c4, c5, k=1)
 
-        # v2 [1a]: mean pool instead of AdaptiveAvgPool2d
-        # — avoids GPU kernel sync overhead, fully deterministic
-        # self.pool = nn.AdaptiveAvgPool2d(1)  # removed
+        self.pool = nn.AdaptiveAvgPool2d(1)
 
         self.classifier = nn.Linear(c5, num_classes)
 
@@ -501,22 +427,14 @@ class EdgeJuFormer(nn.Module):
         for m in self.modules():
 
             if isinstance(m, nn.Conv2d):
-
                 nn.init.kaiming_normal_(
-                    m.weight,
-                    mode='fan_out',
-                    nonlinearity='relu'
+                    m.weight, mode='fan_out', nonlinearity='relu'
                 )
-
             elif isinstance(m, nn.BatchNorm2d):
-
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
-
             elif isinstance(m, nn.Linear):
-
                 nn.init.normal_(m.weight, 0, 0.01)
-
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
@@ -525,18 +443,11 @@ class EdgeJuFormer(nn.Module):
     def forward(self, x):
 
         x = self.stem(x)
-
         x = self.stage1(x)
-
         x = self.stage2(x)
-
         x = self.stage3(x)
-
         x = self.head(x)
-
-        # v2 [1a]: deterministic mean pool (no AdaptiveAvgPool2d)
-        x = x.mean(dim=[2, 3])
-
+        x = self.pool(x).flatten(1)
         x = self.classifier(x)
 
         return x
@@ -544,11 +455,8 @@ class EdgeJuFormer(nn.Module):
     # --------------------------------------------------------
 
     def count_parameters(self):
-
         return sum(
-            p.numel()
-            for p in self.parameters()
-            if p.requires_grad
+            p.numel() for p in self.parameters() if p.requires_grad
         )
 
     # --------------------------------------------------------
@@ -557,29 +465,18 @@ class EdgeJuFormer(nn.Module):
 
         feats = {}
 
-        x = self.stem(x)
-        feats["stem"] = x
-
-        x = self.stage1(x)
-        feats["stage1"] = x
-
-        x = self.stage2(x)
-        feats["stage2"] = x
-
-        x = self.stage3(x)
-        feats["stage3"] = x
-
-        x = self.head(x)
-        feats["head"] = x
+        x = self.stem(x);      feats["stem"]   = x
+        x = self.stage1(x);    feats["stage1"] = x
+        x = self.stage2(x);    feats["stage2"] = x
+        x = self.stage3(x);    feats["stage3"] = x
+        x = self.head(x);      feats["head"]   = x
 
         return feats
 
     # --------------------------------------------------------
 
     def __repr__(self):
-
         p = self.count_parameters()
-
         return (
             f"EdgeJuFormer("
             f"params={p:,}, "
@@ -592,32 +489,31 @@ class EdgeJuFormer(nn.Module):
 # ============================================================
 
 def edgejuformer(num_classes=4):
-
-    return EdgeJuFormer(
-        num_classes=num_classes,
-        width_mult=1.0
-    )
+    return EdgeJuFormer(num_classes=num_classes, width_mult=1.0)
 
 
 def edgejuformer_s(num_classes=4):
-
-    return EdgeJuFormer(
-        num_classes=num_classes,
-        width_mult=0.75
-    )
+    return EdgeJuFormer(num_classes=num_classes, width_mult=0.75)
 
 
 def edgejuformer_xs(num_classes=4):
-
-    return EdgeJuFormer(
-        num_classes=num_classes,
-        width_mult=0.5
-    )
+    return EdgeJuFormer(num_classes=num_classes, width_mult=0.5)
 
 
 # ============================================================
 # build_model  (required by model registry)
 # ============================================================
+
+# Map ablation tag → ablation_mode string passed to EdgeJuFormer
+_ABLATION_MODE_MAP = {
+    "no_dyndw":  "no_dyndw",
+    "no_token":  "no_token",
+    "no_ca":     "no_ca",
+    "cnn_only":  "cnn_only",
+    "baseline":  "baseline",
+    None:        None,
+}
+
 
 def build_model(name: str = "juformer",
                 num_classes: int = 4,
@@ -631,13 +527,15 @@ def build_model(name: str = "juformer",
             f"Choose from: {list(MODEL_CONFIGS)}"
         )
 
+    ablation_mode = _ABLATION_MODE_MAP[cfg.get("ablation")]
+
     model = EdgeJuFormer(
         num_classes=num_classes,
         width_mult=cfg["width_mult"],
+        ablation_mode=ablation_mode,
     )
 
     if in_channels != 3:
-        # stem[0] is the Conv2d inside _cbr(3, c1, k=3, s=2)
         old = model.stem[0]
         model.stem[0] = nn.Conv2d(
             in_channels,
@@ -654,23 +552,19 @@ def build_model(name: str = "juformer",
 
 
 # ============================================================
-# Test
+# Quick self-test
 # ============================================================
 
 if __name__ == "__main__":
 
-    model = build_model(name="juformer", num_classes=4)
+    x = torch.randn(1, 3, 224, 224)
 
-    # v3: default input resolution is 160x160
-    x = torch.randn(1, 3, 160, 160)
+    print(f"{'Variant':<16} {'Params':>10}  {'Output'}")
+    print("-" * 50)
 
-    y = model(x)
-
-    print(model)
-
-    print("Output shape:", y.shape)
-
-    print("Parameters:", model.count_parameters())
-
-    # recommended: compile for faster GPU inference (PyTorch >= 2.0)
-    # model = torch.compile(model, mode="reduce-overhead")
+    for name in MODEL_CONFIGS:
+        m = build_model(name, num_classes=5)
+        m.eval()
+        with torch.no_grad():
+            y = m(x)
+        print(f"{name:<16} {m.count_parameters():>10,}  {tuple(y.shape)}")
