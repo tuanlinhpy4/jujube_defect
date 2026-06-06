@@ -120,7 +120,7 @@ class SEResNet50(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
         x = self.layer1(x)
         x = self.layer2(x)
@@ -129,9 +129,10 @@ class SEResNet50(nn.Module):
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
 
-        features = self.feature_layer(x)
-        logits   = self.classifier(features)
-        return logits, features
+        features      = self.feature_layer(x)
+        logits        = self.classifier(features)
+        self._features = features   # lưu để CombinedLoss dùng
+        return logits               # trả về Tensor đơn, tương thích train.py
 
 
 class CenterLoss(nn.Module):
@@ -155,18 +156,19 @@ class CenterLoss(nn.Module):
 
 
 class CombinedLoss(nn.Module):
-    def __init__(self, num_classes: int, feature_dim: int,
+    def __init__(self, model: "SEResNet50", num_classes: int, feature_dim: int,
                  lambda_c: float = 0.003):
         super().__init__()
+        self.model       = model
         self.ce_loss     = nn.CrossEntropyLoss()
         self.center_loss = CenterLoss(num_classes, feature_dim, lambda_c)
 
-    def forward(self, logits: torch.Tensor, features: torch.Tensor,
-                labels: torch.Tensor):
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor):
+        """Signature giống CrossEntropyLoss: criterion(outputs, labels)"""
+        features    = self.model._features          # lấy từ forward pass vừa chạy
         loss_ce     = self.ce_loss(logits, labels)
         loss_center = self.center_loss(features, labels)
-        total       = loss_ce + loss_center
-        return total, loss_ce, loss_center
+        return loss_ce + loss_center
 
 
 def build_model(name="se_resnet50_cl", num_classes=5, in_channels=3, **kwargs):
@@ -182,7 +184,7 @@ def build_model(name="se_resnet50_cl", num_classes=5, in_channels=3, **kwargs):
         model.conv1 = nn.Conv2d(in_channels, 64, 7,
                                 stride=2, padding=3, bias=False)
 
-    model.num_classes  = num_classes
-    model.criterion    = CombinedLoss(num_classes, feature_dim, lambda_c)
+    model.num_classes = num_classes
+    model.criterion   = CombinedLoss(model, num_classes, feature_dim, lambda_c)
 
     return model
