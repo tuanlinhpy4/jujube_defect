@@ -1,6 +1,6 @@
 """
-EdgeJuFormer v4 — SE + Ghost + RepVGG DW
------------------------------------------
+EdgeJuFormer v4 — SE + RepVGG DW
+----------------------------------
 
 Cải tiến kiến trúc từ A3 (best ablation, F1=84.44%, lat=6.88ms):
 
@@ -9,22 +9,18 @@ Cải tiến kiến trúc từ A3 (best ablation, F1=84.44%, lat=6.88ms):
        - GAP → FC(r=4) → ReLU → FC → Sigmoid — nhẹ hơn CA ~0.2ms
        - Channel recalibration phù hợp jujube: phân biệt qua màu/texture
 
-    2. Ghost Module thay Conv1×1 trong expand + project
-       - Tạo 1/2 channel bằng Conv1×1 thật (primary)
-       - 1/2 còn lại bằng DWConv3×3 rẻ (ghost)
-       - Giảm ~50% FLOPs ở pointwise path → −0.5–1ms latency
-
-    3. RepVGG-style DW (RepDWConv) thay DynamicDWConv
+    2. RepVGG-style DW (RepDWConv) thay DynamicDWConv
        - Train: 3×3 + 1×1 DWConv song song (multi-branch)
        - Inference: fuse thành 1 conv duy nhất → zero overhead
        - Gọi model.reparameterize() trước khi deploy/benchmark
+sa
+    Ghost Module đã bỏ: giảm params 320k→254k làm F1 drop trên dataset nhỏ.
 
-Ablation variants (giữ nguyên từ file cũ):
-    juformer_a1 → juformer_a5: các variant bỏ từng module
+Ablation variants (giữ nguyên):
+    juformer_a1 → juformer_a5
 
 Chạy:
-    python train.py --dataset jujube_ours --model juformer    --seed 1
-    python train.py --dataset jujube_ours --model juformer_a3 --seed 1  # best baseline
+    python train.py --dataset jujube_ours --model juformer --seed 1
 """
 
 from __future__ import annotations
@@ -497,8 +493,8 @@ class EdgeJuFormerBlock(nn.Module):
         hidden = in_ch * expand_ratio
         self.use_res = (stride == 1 and in_ch == out_ch)
 
-        # ── [v4] Ghost expand (thay _cbr 1×1) ─────────────────
-        self.expand = _ghost_cbr(in_ch, hidden, k=1)
+        # expansion — plain _cbr (Ghost bị bỏ: giảm capacity trên dataset nhỏ)
+        self.expand = _cbr(in_ch, hidden, k=1)
 
         # ── [v4] RepDWConv / StaticDWConv / DynamicDWConv ─────
         use_static_dw = ablation_mode in ("no_dyndw", "baseline")
@@ -521,10 +517,9 @@ class EdgeJuFormerBlock(nn.Module):
             TinyTokenMixer(hidden)
         )
 
-        # ── [v4] Ghost project (thay _cbr 1×1) ────────────────
-        # Ghost project: Conv1×1 ghost → BN (không ReLU ở cuối block)
+        # projection — plain Conv1×1 (Ghost bị bỏ)
         self.project = nn.Sequential(
-            GhostModule(hidden, out_ch, k=1, act=False),
+            nn.Conv2d(hidden, out_ch, 1, bias=False),
             nn.BatchNorm2d(out_ch)
         )
 
