@@ -156,8 +156,11 @@ class CBAMBlock(nn.Module):
         hidden = max(channels // reduction, 8)
 
         # ── Channel Attention ──────────────────────────────────
+        # avg_pool: deterministic mean — dùng _GAPFull
+        # max_pool: KHÔNG dùng AdaptiveMaxPool2d (non-deterministic
+        #   backward trên CUDA khi use_deterministic_algorithms=True)
+        #   → dùng x.flatten(2).max(dim=2) thay thế
         self.avg_pool = _GAPFull()
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
 
         self.ch_fc1 = nn.Conv2d(channels, hidden, 1, bias=False)
         self.ch_act = nn.ReLU(inplace=True)
@@ -172,17 +175,27 @@ class CBAMBlock(nn.Module):
             bias=False
         )
 
+    @staticmethod
+    def _max_pool_det(x: torch.Tensor) -> torch.Tensor:
+        """Deterministic global max pool → (B, C, 1, 1).
+
+        AdaptiveMaxPool2d backward không deterministic trên CUDA.
+        flatten + max trên dim=2 hoạt động đúng với
+        use_deterministic_algorithms(True).
+        """
+        return x.flatten(2).max(dim=2).values.unsqueeze(-1).unsqueeze(-1)
+
     def forward(self, x):
 
-        # 1. Channel attention
-        avg = self.ch_fc2(self.ch_act(self.ch_fc1(self.avg_pool(x))))
-        mx  = self.ch_fc2(self.ch_act(self.ch_fc1(self.max_pool(x))))
+        # 1. Channel attention (avg + max, chia sẻ FC)
+        avg  = self.ch_fc2(self.ch_act(self.ch_fc1(self.avg_pool(x))))
+        mx   = self.ch_fc2(self.ch_act(self.ch_fc1(self._max_pool_det(x))))
         ch_w = torch.sigmoid(avg + mx)
-        x = x * ch_w
+        x    = x * ch_w
 
         # 2. Spatial attention
-        avg_sp = x.mean(dim=1, keepdim=True)          # (B,1,H,W)
-        max_sp = x.max(dim=1, keepdim=True).values     # (B,1,H,W)
+        avg_sp = x.mean(dim=1, keepdim=True)           # (B,1,H,W)
+        max_sp = x.max(dim=1, keepdim=True).values      # (B,1,H,W) — deterministic
         sp_w   = torch.sigmoid(
             self.sp_conv(torch.cat([avg_sp, max_sp], dim=1))
         )
