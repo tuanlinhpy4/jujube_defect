@@ -459,7 +459,7 @@ class EdgeJuFormerBlock(nn.Module):
         if disable_attn or not use_attn:
             self.attn = _IdentityAttn(out_ch)
         else:
-            self.attn = CBAMBlock(out_ch, reduction=4, spatial_k=7)
+            self.attn = CBAMBlock(out_ch, reduction=4, spatial_k=3)
 
         self.drop = (
             DropPath(drop_path) if drop_path > 0 else nn.Identity()
