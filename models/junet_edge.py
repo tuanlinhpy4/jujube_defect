@@ -436,6 +436,14 @@ MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
     # -- Large: max-accuracy push (wider + deeper stage3). Weights -> QSPI.
     "junet_edge_l": _cfg(stem_ch=32, head_ch=192, dropout=0.1, drop_path=0.12,
         stages=make_stages(channels=(56, 88, 128), depths=(1, 2, 3))),
+
+    # -- Large + SE everywhere: controlled toggle vs junet_edge_l (identical
+    #    backbone; the only change is stage-level SE added to stages 1 & 2, so
+    #    every stage now has SE). Tests whether more channel attention helps.
+    #    SE is int8-clean (op_u8_u8), so this stays fully int8/CMSIS-NN friendly.
+    "junet_edge_l_se": _cfg(stem_ch=32, head_ch=192, dropout=0.1, drop_path=0.12,
+        stages=make_stages(channels=(56, 88, 128), depths=(1, 2, 3),
+                           attn=("se", "se", "se"))),
 }
 
 
@@ -446,6 +454,7 @@ _NOTES = {
     "junet_edge": "Ship model: RepDW front + Ghost deep + keephi 8x8 + late SE, ReLU, int8-clean.",
     "junet_edge_s": "Smaller variant sized to fit 128 KB internal flash.",
     "junet_edge_l": "Wider/deeper max-accuracy variant (weights expect external QSPI flash).",
+    "junet_edge_l_se": "junet_edge_l backbone + stage-level SE on all 3 stages (int8-clean attention toggle).",
 }
 
 
