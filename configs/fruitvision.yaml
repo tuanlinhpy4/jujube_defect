@@ -1,0 +1,30 @@
+dataset: fruitvision
+data_root: ./data/fruitvision
+num_classes: 15
+class_names: [
+  Apple_Fresh, Apple_Rotten, Apple_Formalin-mixed,
+  Banana_Fresh, Banana_Rotten, Banana_Formalin-mixed,
+  Grape_Fresh, Grape_Rotten, Grape_Formalin-mixed,
+  Mango_Fresh, Mango_Rotten, Mango_Formalin-mixed,
+  Orange_Fresh, Orange_Rotten, Orange_Formalin-mixed,
+]
+input_size: 224
+batch_size_train: 32
+batch_size_eval: 32
+num_workers: 2
+epochs: 100
+optimizer: adamw
+lr: 0.001
+weight_decay: 0.0001
+lr_scheduler: cosine
+warmup_epochs: 5
+loss:
+  name: cross_entropy
+augmentation:
+  horizontal_flip: true
+  vertical_flip: false
+  rotation: 15
+  color_jitter: 0.2
+  random_erasing: 0.1
+normalize_mean: [0.485, 0.456, 0.406]
+normalize_std: [0.229, 0.224, 0.225]

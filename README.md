@@ -9,20 +9,34 @@ Targets reproducible A\*/Q1 reporting: fixed 70/15/15 stratified split, 5-seed p
 |---------|---------|------------|
 | `jujube` | niaozhuo, meibian, liekou, haozao, gantiao, bianxing (6) | 42 |
 | `jujube_ours` | dry, insect_damaged, cracked, mold, invalid (5) | 42 |
+| `fruitvision` | 5 fruits × {Fresh, Rotten, Formalin-mixed} (15) | 42 |
 
 Datasets are **auto-downloaded** on first run. To download manually:
 ```bash
-python download_data.py                   # both datasets
+python download_data.py                   # all datasets
 python download_data.py --dataset jujube
+python download_data.py --dataset fruitvision
 ```
 
-Or place datasets manually at `data/jujube/` and `data/jujube_ours/` as flat class folders:
+Or place datasets manually at `data/jujube/`, `data/jujube_ours/` as flat class folders:
 ```
 data/jujube/
   niaozhuo/  meibian/  liekou/  haozao/  gantiao/  bianxing/
 data/jujube_ours/
   dry/  insect_damaged/  cracked/  mold/  invalid/
 ```
+
+`fruitvision` ships as a nested `Fruit/Condition` layout (e.g. `Apple/Fresh/`, `Apple/Rotten/`, `Apple/Formalin-mixed/`).
+`download_data.py` flattens this into 15 combined class folders automatically:
+```
+data/fruitvision/
+  Apple_Fresh/  Apple_Rotten/  Apple_Formalin-mixed/
+  Banana_Fresh/ Banana_Rotten/ Banana_Formalin-mixed/
+  Grape_Fresh/  Grape_Rotten/  Grape_Formalin-mixed/
+  Mango_Fresh/  Mango_Rotten/  Mango_Formalin-mixed/
+  Orange_Fresh/ Orange_Rotten/ Orange_Formalin-mixed/
+```
+Source: https://huggingface.co/datasets/doantrongthai/FruitVision
 
 ## Models
 

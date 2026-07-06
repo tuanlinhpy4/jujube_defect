@@ -5,3 +5,5 @@ Pillow
 PyYAML
 matplotlib
 tqdm
+gdown
+huggingface_hub

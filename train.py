@@ -32,6 +32,7 @@ from utils import (
 DATASET_CONFIGS = {
     "jujube":      str(PROJECT_ROOT / "configs" / "jujube.yaml"),
     "jujube_ours": str(PROJECT_ROOT / "configs" / "jujube_ours.yaml"),
+    "fruitvision": str(PROJECT_ROOT / "configs" / "fruitvision.yaml"),
 }
 SPLIT_SEED = 42
 
@@ -45,6 +46,7 @@ def parse_args() -> argparse.Namespace:
             "  python train.py --dataset jujube --model mobilenet_v3_small --seed 1\n"
             "  python train.py --dataset jujube_ours --model efficientnet_b0 --seed 1 2 3 4 5\n"
             "  python train.py --dataset jujube --model resnet18 --seed 1 2 3\n"
+            "  python train.py --dataset fruitvision --model efficientnet_b0 --seed 1 2 3 4 5\n"
         ),
     )
     p.add_argument("--dataset", required=True, choices=list(DATASET_CONFIGS.keys()))
@@ -593,7 +595,7 @@ def main():
     device = get_device(args.device)
 
     print(f"\n{'='*65}")
-    print(f"  Jujube Classification")
+    print(f"  Fruit / Jujube Classification")
     print(f"  Dataset : {args.dataset}")
     print(f"  Model   : {args.model}")
     print(f"  Loss    : {args.loss}")
