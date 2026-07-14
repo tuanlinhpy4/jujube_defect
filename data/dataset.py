@@ -82,7 +82,7 @@ def create_dataloaders(cfg: dict, split_seed: int = SPLIT_SEED,
     mean = cfg["normalize_mean"]
     std = cfg["normalize_std"]
     aug = cfg.get("augmentation", {})
-    class_names = cfg["class_names"]
+    class_names = cfg.get("class_names")  # optional — auto-detected below if omitted
     batch_train = cfg["batch_size_train"]
     batch_eval = cfg["batch_size_eval"]
     num_workers = cfg.get("num_workers", 4)
@@ -96,15 +96,24 @@ def create_dataloaders(cfg: dict, split_seed: int = SPLIT_SEED,
 
     # actual_classes is sorted alphabetically by ImageFolder — this IS the ground-truth
     # label order (ImageFolder assigns label 0 to the first alphabetical folder, etc.).
-    # class_names from yaml is used only as a sanity-check, NOT as the label mapping.
+    # class_names from yaml is optional and only used as a sanity-check, NOT as the
+    # label mapping. When omitted, classes are auto-detected from the folder names.
     actual_classes = full_aug.classes
-    for c in class_names:
-        if c not in actual_classes:
-            raise ValueError(f"Class '{c}' not found in {root}. Found: {actual_classes}")
-    if set(class_names) != set(actual_classes):
-        raise ValueError(
-            f"yaml class_names {sorted(class_names)} != folders {actual_classes}"
-        )
+    if not actual_classes:
+        raise ValueError(f"No class folders found under {root}.")
+    if class_names:
+        for c in class_names:
+            if c not in actual_classes:
+                raise ValueError(f"Class '{c}' not found in {root}. Found: {actual_classes}")
+        if set(class_names) != set(actual_classes):
+            raise ValueError(
+                f"yaml class_names {sorted(class_names)} != folders {actual_classes}"
+            )
+    else:
+        print(f"  [dataset] Auto-detected {len(actual_classes)} classes from "
+              f"'{root}': {actual_classes}")
+
+    num_classes = cfg.get("num_classes") or len(actual_classes)
 
     targets = full_aug.targets
     train_idx, val_idx, test_idx = _stratified_split(targets, seed=split_seed)
@@ -122,6 +131,6 @@ def create_dataloaders(cfg: dict, split_seed: int = SPLIT_SEED,
         "val": DataLoader(val_ds, batch_size=batch_eval, shuffle=False, **loader_kw),
         "test": DataLoader(test_ds, batch_size=batch_eval, shuffle=False, **loader_kw),
         "class_names": actual_classes,   # alphabetical = ImageFolder label order; yaml order is WRONG
-        "num_classes": cfg["num_classes"],
+        "num_classes": num_classes,
         "split_sizes": {"train": len(train_idx), "val": len(val_idx), "test": len(test_idx)},
     }

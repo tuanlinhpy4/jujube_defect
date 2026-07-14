@@ -10,12 +10,23 @@ Targets reproducible A\*/Q1 reporting: fixed 70/15/15 stratified split, 5-seed p
 | `jujube` | niaozhuo, meibian, liekou, haozao, gantiao, bianxing (6) | 42 |
 | `jujube_ours` | dry, insect_damaged, cracked, mold, invalid (5) | 42 |
 | `fruitvision` | 5 fruits × {Fresh, Rotten, Formalin-mixed} (15) | 42 |
+| `sapota` | Large, Medium, Small, Spoiled (4) | 42 |
+| `jujube_healthy` | bruised, healthy (2) | 42 |
+| `mango_dhds` | Anthracnose, Bacterial Canker, Healthy, Scab, Stem End Rot (5) | 42 |
+
+`sapota`, `jujube_healthy`, and `mango_dhds` come from the same Hugging Face
+repo as `fruitvision` (https://huggingface.co/datasets/doantrongthai/FruitVision),
+as separate zip files. Their class folders are auto-detected at load time —
+the yaml configs don't hardcode `class_names`/`num_classes`.
 
 Datasets are **auto-downloaded** on first run. To download manually:
 ```bash
-python download_data.py                   # all datasets
+python download_data.py                     # all datasets
 python download_data.py --dataset jujube
 python download_data.py --dataset fruitvision
+python download_data.py --dataset sapota
+python download_data.py --dataset jujube_healthy
+python download_data.py --dataset mango_dhds
 ```
 
 Or place datasets manually at `data/jujube/`, `data/jujube_ours/` as flat class folders:
@@ -37,6 +48,17 @@ data/fruitvision/
   Orange_Fresh/ Orange_Rotten/ Orange_Formalin-mixed/
 ```
 Source: https://huggingface.co/datasets/doantrongthai/FruitVision
+
+`sapota`, `jujube_healthy`, `mango_dhds` are already flat class folders after
+extraction — no reorganizing needed, classes are picked up automatically:
+```
+data/sapota/
+  Large/  Medium/  Small/  Spoiled/
+data/jujube_healthy/
+  bruised/  healthy/
+data/mango_dhds/
+  Anthracnose/  "Bacterial Canker"/  Healthy/  Scab/  "Stem End Rot"/
+```
 
 ## Models
 
@@ -75,6 +97,12 @@ python train.py --dataset jujube --model mobilenet_v3_small --seed 1
 python train.py --dataset jujube_ours --model efficientnet_b0 --seed 1 2 3 4 5
 
 python train.py --dataset jujube --model resnet18 --seed 1 2 3
+
+python train.py --dataset sapota --model mobilenet_v3_small --seed 1 2 3 4 5
+
+python train.py --dataset jujube_healthy --model mobilenet_v3_small --seed 1 2 3 4 5
+
+python train.py --dataset mango_dhds --model efficientnet_b0 --seed 1 2 3 4 5
 ```
 
 `--seed` accepts any number of values. Each seed is run sequentially.  

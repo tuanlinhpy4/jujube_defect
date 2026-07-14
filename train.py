@@ -30,9 +30,12 @@ from utils import (
 )
 
 DATASET_CONFIGS = {
-    "jujube":      str(PROJECT_ROOT / "configs" / "jujube.yaml"),
-    "jujube_ours": str(PROJECT_ROOT / "configs" / "jujube_ours.yaml"),
-    "fruitvision": str(PROJECT_ROOT / "configs" / "fruitvision.yaml"),
+    "jujube":         str(PROJECT_ROOT / "configs" / "jujube.yaml"),
+    "jujube_ours":    str(PROJECT_ROOT / "configs" / "jujube_ours.yaml"),
+    "fruitvision":    str(PROJECT_ROOT / "configs" / "fruitvision.yaml"),
+    "sapota":         str(PROJECT_ROOT / "configs" / "sapota.yaml"),
+    "jujube_healthy": str(PROJECT_ROOT / "configs" / "jujube_healthy.yaml"),
+    "mango_dhds":     str(PROJECT_ROOT / "configs" / "mango_dhds.yaml"),
 }
 SPLIT_SEED = 42
 
@@ -47,6 +50,9 @@ def parse_args() -> argparse.Namespace:
             "  python train.py --dataset jujube_ours --model efficientnet_b0 --seed 1 2 3 4 5\n"
             "  python train.py --dataset jujube --model resnet18 --seed 1 2 3\n"
             "  python train.py --dataset fruitvision --model efficientnet_b0 --seed 1 2 3 4 5\n"
+            "  python train.py --dataset sapota --model mobilenet_v3_small --seed 1 2 3 4 5\n"
+            "  python train.py --dataset jujube_healthy --model mobilenet_v3_small --seed 1 2 3 4 5\n"
+            "  python train.py --dataset mango_dhds --model efficientnet_b0 --seed 1 2 3 4 5\n"
         ),
     )
     p.add_argument("--dataset", required=True, choices=list(DATASET_CONFIGS.keys()))
@@ -612,6 +618,13 @@ def main():
     _meta_loaders = create_dataloaders(cfg, split_seed=SPLIT_SEED)
     sizes = _meta_loaders["split_sizes"]
     print(f"  Train: {sizes['train']} | Val: {sizes['val']} | Test: {sizes['test']}")
+
+    # Auto-detected classes (works whether or not the yaml declares class_names /
+    # num_classes explicitly) — propagate into cfg so run_seed/compute_class_weights
+    # below always see the real, alphabetically-ordered class list.
+    cfg["num_classes"] = _meta_loaders["num_classes"]
+    cfg["class_names"] = _meta_loaders["class_names"]
+    print(f"  Classes ({cfg['num_classes']}): {cfg['class_names']}")
 
     write_json(
         os.path.join("runs", args.dataset, args.model, args.loss,

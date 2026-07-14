@@ -2,16 +2,22 @@
 """Auto-download jujube and fruitvision datasets.
 
 Usage (standalone):
-    python download_data.py                  # download all datasets
+    python download_data.py                        # download all datasets
     python download_data.py --dataset jujube
     python download_data.py --dataset jujube_ours
     python download_data.py --dataset fruitvision
+    python download_data.py --dataset sapota
+    python download_data.py --dataset jujube_healthy
+    python download_data.py --dataset mango_dhds
 
 Usage (from code):
     from download_data import ensure_dataset
-    ensure_dataset("jujube",      data_root="./data/jujube")
-    ensure_dataset("jujube_ours", data_root="./data/jujube_ours")
-    ensure_dataset("fruitvision", data_root="./data/fruitvision")
+    ensure_dataset("jujube",         data_root="./data/jujube")
+    ensure_dataset("jujube_ours",    data_root="./data/jujube_ours")
+    ensure_dataset("fruitvision",    data_root="./data/fruitvision")
+    ensure_dataset("sapota",         data_root="./data/sapota")
+    ensure_dataset("jujube_healthy", data_root="./data/jujube_healthy")
+    ensure_dataset("mango_dhds",     data_root="./data/mango_dhds")
 """
 
 from __future__ import annotations
@@ -54,6 +60,29 @@ DATASETS: Dict[str, Dict] = {
         "expected_classes": _FRUITVISION_CLASSES,
         "fruit_dirs": _FRUITVISION_FRUITS,
         "condition_dirs": _FRUITVISION_CONDITIONS,
+    },
+    # Same HF repo (doantrongthai/FruitVision) also ships these three
+    # standalone zips. Each one already extracts into flat class folders,
+    # so no fruit/condition reorganizing is needed — just extract + flatten.
+    "sapota": {
+        "hf_repo_id": "doantrongthai/FruitVision",
+        "hf_filename": "sapota.zip",
+        "default_root": "./data/sapota",
+        "expected_classes": ["Large", "Medium", "Small", "Spoiled"],
+    },
+    "jujube_healthy": {
+        "hf_repo_id": "doantrongthai/FruitVision",
+        "hf_filename": "jujube_healthy.zip",
+        "default_root": "./data/jujube_healthy",
+        "expected_classes": ["bruised", "healthy"],
+    },
+    "mango_dhds": {
+        "hf_repo_id": "doantrongthai/FruitVision",
+        "hf_filename": "mangoDHDS.zip",
+        "default_root": "./data/mango_dhds",
+        "expected_classes": [
+            "Anthracnose", "Bacterial Canker", "Healthy", "Scab", "Stem End Rot",
+        ],
     },
 }
 
@@ -172,15 +201,24 @@ def ensure_dataset(dataset: str, data_root: str | None = None) -> str:
         zip_path = f"/tmp/{dataset}.zip"
         _download_huggingface(info["hf_repo_id"], info["hf_filename"], zip_path)
 
-        extract_dir = f"/tmp/{dataset}_extract"
-        if os.path.isdir(extract_dir):
-            shutil.rmtree(extract_dir)
-        _extract_zip(zip_path, extract_dir)
+        if "fruit_dirs" in info:
+            # fruitvision.zip ships a nested Fruit/Condition layout that
+            # needs merging into combined "Fruit_Condition" class folders.
+            extract_dir = f"/tmp/{dataset}_extract"
+            if os.path.isdir(extract_dir):
+                shutil.rmtree(extract_dir)
+            _extract_zip(zip_path, extract_dir)
 
-        _reorganize_fruitvision(
-            Path(extract_dir), info["fruit_dirs"], info["condition_dirs"], Path(root)
-        )
-        shutil.rmtree(extract_dir, ignore_errors=True)
+            _reorganize_fruitvision(
+                Path(extract_dir), info["fruit_dirs"], info["condition_dirs"], Path(root)
+            )
+            shutil.rmtree(extract_dir, ignore_errors=True)
+        else:
+            # sapota.zip / jujube_healthy.zip / mangoDHDS.zip already
+            # extract straight into flat class folders — just unzip and
+            # flatten one wrapper level if the zip has one.
+            _extract_zip(zip_path, root)
+            _flatten_if_nested(root, expected)
     else:
         _require_gdown()
         zip_path = f"/tmp/{dataset}.zip"
