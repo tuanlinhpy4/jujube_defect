@@ -728,6 +728,7 @@ _ABLATION_MODE_MAP = {
     "no_ca":     "no_ca",
     "cnn_only":  "cnn_only",
     "baseline":  "baseline",
+    "no_ca_no_dyndw": "no_ca_no_dyndw",
     None:        None,
 }
 
