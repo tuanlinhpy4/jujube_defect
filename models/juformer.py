@@ -517,7 +517,7 @@ class EdgeJuFormerBlock(nn.Module):
             self.downsample = nn.Identity()
 
         # ── TinyTokenMixer vs Identity ─────────────────────────
-        disable_token = ablation_mode in ("no_token", "cnn_only", "baseline","no_ca_no_dyndw")
+        disable_token = ablation_mode in ("no_token", "cnn_only", "baseline")
         self.token = (
             nn.Identity()
             if (not use_token or disable_token) else
@@ -532,7 +532,7 @@ class EdgeJuFormerBlock(nn.Module):
 
         # ── [v4] SE block thay CoordAttention ─────────────────
         # SE chỉ dùng ở stage3 (use_se=True), bỏ stage1/2
-        disable_ca = ablation_mode in ("no_ca", "cnn_only", "baseline")
+        disable_ca = ablation_mode in ("no_ca", "cnn_only", "baseline","no_ca_no_dyndw")
         if disable_ca or not use_se:
             self.se = _IdentitySE(out_ch)
         else:
