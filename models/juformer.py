@@ -48,6 +48,13 @@ MODEL_CONFIGS = {
                     "ablation": None},
     "juformer_xs": {"input_size": 224, "width_mult": 0.50,
                     "ablation": None},
+ # ── giữ lại bản full (có SE) để so sánh, đổi tên tránh trùng ──
+    "juformer_full_se": {"input_size": 224, "width_mult": 1.00, "ablation": None},
+
+    # ── sub-ablation của main model (ablation của ablation) ──
+    "juformer_sub_no_token": {"input_size": 224, "width_mult": 1.00, "ablation": "cnn_only"},        # bỏ Token, giữ RepDW
+    "juformer_sub_no_dyndw": {"input_size": 224, "width_mult": 1.00, "ablation": "no_ca_no_dyndw"},  # bỏ RepDW, giữ Token  ← mới
+    "juformer_sub_bare":     {"input_size": 224, "width_mult": 1.00, "ablation": "baseline"},         # bỏ cả hai
 
     # ── ablation variants (giữ nguyên để so sánh) ────────────
     "juformer_a1": {"input_size": 224, "width_mult": 1.00,
@@ -497,7 +504,7 @@ class EdgeJuFormerBlock(nn.Module):
         self.expand = _cbr(in_ch, hidden, k=1)
 
         # ── [v4] RepDWConv / StaticDWConv / DynamicDWConv ─────
-        use_static_dw = ablation_mode in ("no_dyndw", "baseline")
+        use_static_dw = ablation_mode in ("no_dyndw", "baseline","no_ca_no_dyndw")
         if use_static_dw:
             self.dynamic_dw = _StaticDWConv(hidden)
         else:
@@ -510,7 +517,7 @@ class EdgeJuFormerBlock(nn.Module):
             self.downsample = nn.Identity()
 
         # ── TinyTokenMixer vs Identity ─────────────────────────
-        disable_token = ablation_mode in ("no_token", "cnn_only", "baseline")
+        disable_token = ablation_mode in ("no_token", "cnn_only", "baseline","no_ca_no_dyndw")
         self.token = (
             nn.Identity()
             if (not use_token or disable_token) else
