@@ -152,7 +152,11 @@ class JujubeSlimNet(nn.Module):
         self.body = nn.Sequential(*stages)
 
         self.gap = nn.AdaptiveAvgPool2d(1)
-        self.gmp = nn.AdaptiveMaxPool2d(1)
+        # NOTE: nn.AdaptiveMaxPool2d's CUDA backward has no deterministic
+        # implementation, which raises a RuntimeError under
+        # torch.use_deterministic_algorithms(True). We compute the same
+        # Global Max Pooling manually via tensor.amax, which does have a
+        # deterministic backward, instead of changing the pooling itself.
         self.fc = nn.Linear(c_in * 2, num_classes)
 
         self._init_weights()
@@ -172,7 +176,7 @@ class JujubeSlimNet(nn.Module):
         x = self.stem(x)
         x = self.body(x)
         avg = self.gap(x).flatten(1)
-        mx = self.gmp(x).flatten(1)
+        mx = x.amax(dim=[2, 3])
         x = torch.cat([avg, mx], dim=1)
         return self.fc(x)
 
