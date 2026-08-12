@@ -35,9 +35,25 @@ import torch.nn.functional as F
 ARCH_NAME = "juformer"
 
 MODEL_CONFIGS = {
-    "juformer":    {"input_size": 224, "width_mult": 1.00},
-    "juformer_s":  {"input_size": 224, "width_mult": 0.75},
-    "juformer_xs": {"input_size": 224, "width_mult": 0.50},
+    # ── v4 full model ────────────────────────────────────────
+    "juformer":    {"input_size": 224, "width_mult": 1.00,
+                    "ablation": None},
+    "juformer_s":  {"input_size": 224, "width_mult": 0.75,
+                    "ablation": None},
+    "juformer_xs": {"input_size": 224, "width_mult": 0.50,
+                    "ablation": None},
+
+    # ── ablation variants (dựa trên kiến trúc v4: SE + RepDW) ─
+    "juformer_a1": {"input_size": 224, "width_mult": 1.00,
+                    "ablation": "no_repdw"},   # RepDWConv → static 3x3 DW
+    "juformer_a2": {"input_size": 224, "width_mult": 1.00,
+                    "ablation": "no_token"},   # bỏ TinyTokenMixer
+    "juformer_a3": {"input_size": 224, "width_mult": 1.00,
+                    "ablation": "no_se"},      # bỏ SEBlock
+    "juformer_a4": {"input_size": 224, "width_mult": 1.00,
+                    "ablation": "cnn_only"},   # bỏ token + SE
+    "juformer_a5": {"input_size": 224, "width_mult": 1.00,
+                    "ablation": "baseline"},   # bỏ RepDW + token + SE
 }
 
 DEFAULT_VARIANT = "juformer"
@@ -292,6 +308,21 @@ class _KernelProxy:
         self.groups = groups
 
 
+class _StaticDWConv(nn.Module):
+    """
+    Ablation A1/A5: DWConv 3×3 tĩnh, không multi-branch, không
+    reparameterize. Dùng để đo đóng góp của RepDWConv so với
+    một depthwise conv thường.
+    """
+
+    def __init__(self, channels, stride=1):
+        super().__init__()
+        self.dw = _cbr(channels, channels, k=3, s=stride, g=channels)
+
+    def forward(self, x):
+        return self.dw(x)
+
+
 # ============================================================
 # TinyTokenMixer
 # ============================================================
@@ -361,6 +392,7 @@ class EdgeJuFormerBlock(nn.Module):
         use_token=True,
         use_se=False,           # SE chỉ bật ở stage3
         drop_path=0.0,
+        ablation_mode: str | None = None,
     ):
         super().__init__()
 
@@ -370,8 +402,12 @@ class EdgeJuFormerBlock(nn.Module):
         # expansion
         self.expand = _cbr(in_ch, hidden, k=1)
 
-        # RepDWConv
-        self.dynamic_dw = RepDWConv(hidden, stride=1)
+        # ── RepDWConv vs StaticDWConv ──────────────────────────
+        use_static_dw = ablation_mode in ("no_repdw", "baseline")
+        if use_static_dw:
+            self.dynamic_dw = _StaticDWConv(hidden, stride=1)
+        else:
+            self.dynamic_dw = RepDWConv(hidden, stride=1)
 
         # downsample (stride conv — không fuse RepVGG)
         if stride == 2:
@@ -379,9 +415,12 @@ class EdgeJuFormerBlock(nn.Module):
         else:
             self.downsample = nn.Identity()
 
-        # TinyTokenMixer vs Identity
+        # ── TinyTokenMixer vs Identity ─────────────────────────
+        disable_token = ablation_mode in ("no_token", "cnn_only", "baseline")
         self.token = (
-            TinyTokenMixer(hidden) if use_token else nn.Identity()
+            nn.Identity()
+            if (not use_token or disable_token) else
+            TinyTokenMixer(hidden)
         )
 
         # projection
@@ -390,8 +429,13 @@ class EdgeJuFormerBlock(nn.Module):
             nn.BatchNorm2d(out_ch)
         )
 
-        # SE block (chỉ dùng ở stage3, use_se=True)
-        self.se = SEBlock(out_ch, reduction=4) if use_se else nn.Identity()
+        # ── SE block (chỉ dùng ở stage3, use_se=True) ──────────
+        disable_se = ablation_mode in ("no_se", "cnn_only", "baseline")
+        self.se = (
+            SEBlock(out_ch, reduction=4)
+            if (use_se and not disable_se) else
+            nn.Identity()
+        )
 
         self.drop = (
             DropPath(drop_path) if drop_path > 0 else nn.Identity()
@@ -425,6 +469,7 @@ class EdgeJuFormer(nn.Module):
         num_classes=4,
         width_mult=1.0,
         drop_path=0.1,
+        ablation_mode: str | None = None,
     ):
         super().__init__()
 
@@ -443,11 +488,13 @@ class EdgeJuFormer(nn.Module):
         self.stage1 = EdgeJuFormerBlock(
             c1, c2, stride=2,
             use_token=False, use_se=False,
+            ablation_mode=ablation_mode,
         )
 
         self.stage2 = EdgeJuFormerBlock(
             c2, c3, stride=2,
             use_token=False, use_se=False,
+            ablation_mode=ablation_mode,
         )
 
         # stage3: TokenMixer + SE (chỉ ở đây mới dùng SE)
@@ -455,11 +502,13 @@ class EdgeJuFormer(nn.Module):
             EdgeJuFormerBlock(
                 c3, c4, stride=2,
                 use_token=True, use_se=True,
+                ablation_mode=ablation_mode,
             ),
             EdgeJuFormerBlock(
                 c4, c4, stride=1,
                 use_token=True, use_se=True,
                 drop_path=drop_path,
+                ablation_mode=ablation_mode,
             )
         )
 
@@ -587,6 +636,7 @@ def build_model(name: str = "juformer",
     model = EdgeJuFormer(
         num_classes=num_classes,
         width_mult=cfg["width_mult"],
+        ablation_mode=cfg.get("ablation"),
     )
 
     if in_channels != 3:
@@ -613,16 +663,17 @@ if __name__ == "__main__":
 
     x = torch.randn(1, 3, 224, 224)
 
-    print(f"{'Variant':<16} {'Params (train)':>16}  {'Output'}")
-    print("-" * 60)
+    print(f"{'Variant':<16} {'Params (train)':>16}  {'Output':<14}  {'Ablation'}")
+    print("-" * 80)
 
-    for name in MODEL_CONFIGS:
+    for name, cfg in MODEL_CONFIGS.items():
         m = build_model(name, num_classes=5)
         m.eval()
         with torch.no_grad():
             y = m(x)
         p_train = m.count_parameters()
-        print(f"{name:<16} {p_train:>16,}  {tuple(y.shape)}")
+        note = cfg.get("ablation") or "-"
+        print(f"{name:<16} {p_train:>16,}  {str(tuple(y.shape)):<14}  {note}")
 
     print()
     print("After reparameterize():")
