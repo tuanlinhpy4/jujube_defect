@@ -1,23 +1,18 @@
 """
-EdgeJuFormer v4 — SE + RepVGG DW
-----------------------------------
+EdgeJuFormer v4 — SE + RepVGG DW (clean, no ablation)
+------------------------------------------------------
 
-Cải tiến kiến trúc từ A3 (best ablation, F1=84.44%, lat=6.88ms):
+Kiến trúc:
 
-    1. SE block (Squeeze-and-Excitation) thay CoordAttention
-       - Chỉ dùng ở stage3 (giống A3 bỏ CA hoàn toàn)
-       - GAP → FC(r=4) → ReLU → FC → Sigmoid — nhẹ hơn CA ~0.2ms
+    1. SE block (Squeeze-and-Excitation)
+       - Chỉ dùng ở stage3
+       - GAP → FC(r=4) → ReLU → FC → Sigmoid
        - Channel recalibration phù hợp jujube: phân biệt qua màu/texture
 
-    2. RepVGG-style DW (RepDWConv) thay DynamicDWConv
+    2. RepVGG-style DW (RepDWConv)
        - Train: 3×3 + 1×1 DWConv song song (multi-branch)
        - Inference: fuse thành 1 conv duy nhất → zero overhead
        - Gọi model.reparameterize() trước khi deploy/benchmark
-sa
-    Ghost Module đã bỏ: giảm params 320k→254k làm F1 drop trên dataset nhỏ.
-
-Ablation variants (giữ nguyên):
-    juformer_a1 → juformer_a5
 
 Chạy:
     python train.py --dataset jujube_ours --model juformer --seed 1
@@ -26,8 +21,7 @@ Chạy:
 from __future__ import annotations
 
 import math
-import copy
-from typing import Dict, Any, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -41,25 +35,9 @@ import torch.nn.functional as F
 ARCH_NAME = "juformer"
 
 MODEL_CONFIGS = {
-    # ── v4 full model ────────────────────────────────────────
-    "juformer":    {"input_size": 224, "width_mult": 1.00,
-                    "ablation": None},
-    "juformer_s":  {"input_size": 224, "width_mult": 0.75,
-                    "ablation": None},
-    "juformer_xs": {"input_size": 224, "width_mult": 0.50,
-                    "ablation": None},
-
-    # ── ablation variants (giữ nguyên để so sánh) ────────────
-    "juformer_a1": {"input_size": 224, "width_mult": 1.00,
-                    "ablation": "no_dyndw"},
-    "juformer_a2": {"input_size": 224, "width_mult": 1.00,
-                    "ablation": "no_token"},
-    "juformer_a3": {"input_size": 224, "width_mult": 1.00,
-                    "ablation": "no_ca"},
-    "juformer_a4": {"input_size": 224, "width_mult": 1.00,
-                    "ablation": "cnn_only"},
-    "juformer_a5": {"input_size": 224, "width_mult": 1.00,
-                    "ablation": "baseline"},
+    "juformer":    {"input_size": 224, "width_mult": 1.00},
+    "juformer_s":  {"input_size": 224, "width_mult": 0.75},
+    "juformer_xs": {"input_size": 224, "width_mult": 0.50},
 }
 
 DEFAULT_VARIANT = "juformer"
@@ -90,25 +68,13 @@ def _cbr(in_ch, out_ch, k=1, s=1, g=1):
 
 
 # ============================================================
-# Deterministic GAP helpers
+# Deterministic GAP helper
 # ============================================================
 
 class _GAPFull(nn.Module):
-    """Global Average Pool → (B, C, 1, 1)  — deterministic."""
+    """Global Average Pool → (B, C, 1, 1) — deterministic."""
     def forward(self, x):
         return x.mean(dim=[2, 3], keepdim=True)
-
-
-class _GAPH(nn.Module):
-    """Pool along W only → (B, C, H, 1)  — deterministic."""
-    def forward(self, x):
-        return x.mean(dim=3, keepdim=True)
-
-
-class _GAPW(nn.Module):
-    """Pool along H only → (B, C, 1, W)  — deterministic."""
-    def forward(self, x):
-        return x.mean(dim=2, keepdim=True)
 
 
 # ============================================================
@@ -135,23 +101,19 @@ class DropPath(nn.Module):
 
 
 # ============================================================
-# [NEW v4] SE Block — thay CoordAttention
+# SE Block
 # ============================================================
 
 class SEBlock(nn.Module):
     """
     Squeeze-and-Excitation channel recalibration.
 
-    Lý do dùng thay CoordAttention:
-        - CA dùng pool theo H và W riêng → spatial-aware nhưng nặng hơn
-        - SE dùng GAP toàn cục → channel-only, đủ cho jujube vì
-          phân biệt class chủ yếu qua màu sắc và texture (channel)
-          không phải vị trí không gian
-        - Ít params hơn CA: 2×FC thay vì 3×Conv + pool_h + pool_w
-        - GPU-friendly: 2 Conv1×1 nhỏ fuse tốt với torch.compile
-
-    reduction=4 thay vì 16 (default) vì channels nhỏ (64ch ở stage3)
-    → hidden=16, đủ capacity mà không thêm nhiều params.
+    - SE dùng GAP toàn cục → channel-only, đủ cho jujube vì
+      phân biệt class chủ yếu qua màu sắc và texture (channel)
+      không phải vị trí không gian
+    - reduction=4 (không phải 16 mặc định) vì channels nhỏ
+      (64ch ở stage3) → hidden=16, đủ capacity mà không thêm
+      nhiều params.
     """
 
     def __init__(self, channels, reduction=4):
@@ -172,79 +134,8 @@ class SEBlock(nn.Module):
         return x * w
 
 
-class _IdentitySE(nn.Module):
-    """Ablation: SE replaced with Identity."""
-    def __init__(self, channels, reduction=4):
-        super().__init__()
-
-    def forward(self, x):
-        return x
-
-
 # ============================================================
-# [NEW v4] Ghost Module — thay Conv1×1 trong expand + project
-# ============================================================
-
-class GhostModule(nn.Module):
-    """
-    Ghost Module (Han et al. 2020) thay thế Conv1×1 đắt tiền.
-
-    Ý tưởng:
-        - Tạo out_ch//2 channel "thật" bằng Conv1×1 (primary)
-        - Tạo out_ch//2 channel "ghost" bằng DWConv3×3 rẻ từ primary
-        - Concat → out_ch channels đầy đủ
-        - FLOPs giảm ~50% so với Conv1×1 thông thường
-
-    Phù hợp jujube: texture pattern đơn giản (màu, độ ẩm bề mặt)
-    → ghost feature (linear transform của primary) vẫn capture đủ.
-
-    ratio=2: mỗi primary channel tạo ra 1 ghost → tổng = 2× primary
-    """
-
-    def __init__(self, in_ch, out_ch, k=1, s=1,
-                 ratio=2, dw_k=3, act=True):
-        super().__init__()
-
-        self.out_ch = out_ch
-        primary_ch = math.ceil(out_ch / ratio)
-        ghost_ch   = out_ch - primary_ch
-
-        # primary: Conv1×1 (hoặc Conv k×k) thật
-        self.primary = nn.Sequential(
-            nn.Conv2d(in_ch, primary_ch, k, s,
-                      padding=k // 2, bias=False),
-            nn.BatchNorm2d(primary_ch),
-        )
-
-        # ghost: DWConv rẻ trên primary features
-        self.ghost = nn.Sequential(
-            nn.Conv2d(primary_ch, ghost_ch, dw_k, 1,
-                      padding=dw_k // 2,
-                      groups=primary_ch, bias=False),
-            nn.BatchNorm2d(ghost_ch),
-        )
-
-        self.act = nn.ReLU(inplace=True) if act else nn.Identity()
-
-    def forward(self, x):
-        p = self.primary(x)
-        g = self.ghost(p)
-        out = torch.cat([p, g], dim=1)
-        # trim nếu lẻ (do ceil)
-        out = out[:, :self.out_ch]
-        return self.act(out)
-
-
-def _ghost_cbr(in_ch, out_ch, k=1, s=1):
-    """Ghost module với BN + ReLU — drop-in thay _cbr(k=1)."""
-    if k == 1:
-        return GhostModule(in_ch, out_ch, k=k, s=s, act=True)
-    # k>1 (ví dụ stride conv): dùng cbr thường
-    return _cbr(in_ch, out_ch, k=k, s=s)
-
-
-# ============================================================
-# [NEW v4] RepDWConv — thay DynamicDWConv
+# RepDWConv — RepVGG-style depthwise conv
 # ============================================================
 
 class RepDWConv(nn.Module):
@@ -260,11 +151,6 @@ class RepDWConv(nn.Module):
     Inference mode: gọi reparameterize() để fuse 3 nhánh
     thành 1 DWConv 3×3 duy nhất → zero overhead so với
     plain 3×3 DWConv, nhưng đã học được đa dạng feature hơn.
-
-    So với DynamicDWConv (softmax gate):
-        - DynamicDWConv: tốn 2 DWConv + GAP + 2 Conv gate mỗi forward
-        - RepDWConv train: 3 DWConv nhẹ hơn (1×1 rất rẻ)
-        - RepDWConv infer: 1 DWConv duy nhất → nhanh hơn đáng kể
     """
 
     def __init__(self, channels, stride=1):
@@ -406,19 +292,8 @@ class _KernelProxy:
         self.groups = groups
 
 
-class _StaticDWConv(nn.Module):
-    """Ablation A1/A5: fixed 3×3 DWConv, no dynamic gate."""
-
-    def __init__(self, channels):
-        super().__init__()
-        self.dw = _cbr(channels, channels, k=3, g=channels)
-
-    def forward(self, x):
-        return self.dw(x)
-
-
 # ============================================================
-# TinyTokenMixer  [giữ nguyên từ bản gốc]
+# TinyTokenMixer
 # ============================================================
 
 class TinyTokenMixer(nn.Module):
@@ -472,7 +347,7 @@ class TinyTokenMixer(nn.Module):
 
 
 # ============================================================
-# Hybrid Block  [v4: Ghost expand/project, RepDW, SE]
+# Hybrid Block
 # ============================================================
 
 class EdgeJuFormerBlock(nn.Module):
@@ -486,22 +361,17 @@ class EdgeJuFormerBlock(nn.Module):
         use_token=True,
         use_se=False,           # SE chỉ bật ở stage3
         drop_path=0.0,
-        ablation_mode: str | None = None,
     ):
         super().__init__()
 
         hidden = in_ch * expand_ratio
         self.use_res = (stride == 1 and in_ch == out_ch)
 
-        # expansion — plain _cbr (Ghost bị bỏ: giảm capacity trên dataset nhỏ)
+        # expansion
         self.expand = _cbr(in_ch, hidden, k=1)
 
-        # ── [v4] RepDWConv / StaticDWConv / DynamicDWConv ─────
-        use_static_dw = ablation_mode in ("no_dyndw", "baseline")
-        if use_static_dw:
-            self.dynamic_dw = _StaticDWConv(hidden)
-        else:
-            self.dynamic_dw = RepDWConv(hidden, stride=1)
+        # RepDWConv
+        self.dynamic_dw = RepDWConv(hidden, stride=1)
 
         # downsample (stride conv — không fuse RepVGG)
         if stride == 2:
@@ -509,27 +379,19 @@ class EdgeJuFormerBlock(nn.Module):
         else:
             self.downsample = nn.Identity()
 
-        # ── TinyTokenMixer vs Identity ─────────────────────────
-        disable_token = ablation_mode in ("no_token", "cnn_only", "baseline")
+        # TinyTokenMixer vs Identity
         self.token = (
-            nn.Identity()
-            if (not use_token or disable_token) else
-            TinyTokenMixer(hidden)
+            TinyTokenMixer(hidden) if use_token else nn.Identity()
         )
 
-        # projection — plain Conv1×1 (Ghost bị bỏ)
+        # projection
         self.project = nn.Sequential(
             nn.Conv2d(hidden, out_ch, 1, bias=False),
             nn.BatchNorm2d(out_ch)
         )
 
-        # ── [v4] SE block thay CoordAttention ─────────────────
-        # SE chỉ dùng ở stage3 (use_se=True), bỏ stage1/2
-        disable_ca = ablation_mode in ("no_ca", "cnn_only", "baseline")
-        if disable_ca or not use_se:
-            self.se = _IdentitySE(out_ch)
-        else:
-            self.se = SEBlock(out_ch, reduction=4)
+        # SE block (chỉ dùng ở stage3, use_se=True)
+        self.se = SEBlock(out_ch, reduction=4) if use_se else nn.Identity()
 
         self.drop = (
             DropPath(drop_path) if drop_path > 0 else nn.Identity()
@@ -553,7 +415,7 @@ class EdgeJuFormerBlock(nn.Module):
 
 
 # ============================================================
-# Model  [v4]
+# Model
 # ============================================================
 
 class EdgeJuFormer(nn.Module):
@@ -563,7 +425,6 @@ class EdgeJuFormer(nn.Module):
         num_classes=4,
         width_mult=1.0,
         drop_path=0.1,
-        ablation_mode: str | None = None,
     ):
         super().__init__()
 
@@ -582,13 +443,11 @@ class EdgeJuFormer(nn.Module):
         self.stage1 = EdgeJuFormerBlock(
             c1, c2, stride=2,
             use_token=False, use_se=False,
-            ablation_mode=ablation_mode
         )
 
         self.stage2 = EdgeJuFormerBlock(
             c2, c3, stride=2,
             use_token=False, use_se=False,
-            ablation_mode=ablation_mode
         )
 
         # stage3: TokenMixer + SE (chỉ ở đây mới dùng SE)
@@ -596,13 +455,11 @@ class EdgeJuFormer(nn.Module):
             EdgeJuFormerBlock(
                 c3, c4, stride=2,
                 use_token=True, use_se=True,
-                ablation_mode=ablation_mode
             ),
             EdgeJuFormerBlock(
                 c4, c4, stride=1,
                 use_token=True, use_se=True,
                 drop_path=drop_path,
-                ablation_mode=ablation_mode
             )
         )
 
@@ -715,16 +572,6 @@ def edgejuformer_xs(num_classes=4):
 # build_model  (required by model registry)
 # ============================================================
 
-_ABLATION_MODE_MAP = {
-    "no_dyndw":  "no_dyndw",
-    "no_token":  "no_token",
-    "no_ca":     "no_ca",
-    "cnn_only":  "cnn_only",
-    "baseline":  "baseline",
-    None:        None,
-}
-
-
 def build_model(name: str = "juformer",
                 num_classes: int = 4,
                 in_channels: int = 3,
@@ -737,12 +584,9 @@ def build_model(name: str = "juformer",
             f"Choose from: {list(MODEL_CONFIGS)}"
         )
 
-    ablation_mode = _ABLATION_MODE_MAP[cfg.get("ablation")]
-
     model = EdgeJuFormer(
         num_classes=num_classes,
         width_mult=cfg["width_mult"],
-        ablation_mode=ablation_mode,
     )
 
     if in_channels != 3:
@@ -769,8 +613,8 @@ if __name__ == "__main__":
 
     x = torch.randn(1, 3, 224, 224)
 
-    print(f"{'Variant':<16} {'Params (train)':>16}  {'Output'}  {'Note'}")
-    print("-" * 70)
+    print(f"{'Variant':<16} {'Params (train)':>16}  {'Output'}")
+    print("-" * 60)
 
     for name in MODEL_CONFIGS:
         m = build_model(name, num_classes=5)
@@ -778,7 +622,7 @@ if __name__ == "__main__":
         with torch.no_grad():
             y = m(x)
         p_train = m.count_parameters()
-        print(f"{name:<16} {p_train:>16,}  {tuple(y.shape)}  train mode")
+        print(f"{name:<16} {p_train:>16,}  {tuple(y.shape)}")
 
     print()
     print("After reparameterize():")
