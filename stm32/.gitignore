@@ -1,0 +1,10 @@
+out/
+*.pack
+__pycache__/
+cube/build/
+cube/jujube_h750.map
+# TFLM nguồn tải về (Phase 4) — tái sinh bằng bước tải nguồn trong PLAN.md
+.tflm_clone/
+host/.venv_tflite/
+host/out/onnx/
+host/out/_savedmodel/

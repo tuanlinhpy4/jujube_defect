@@ -1,0 +1,7 @@
+load STM32H750VBTx
+project name jujube_h750
+project path C:\Users\DELL\jujube\stm32\cube
+project toolchain CMake
+SetCopyLibrary "copy only the necessary library files"
+generate code
+exit
