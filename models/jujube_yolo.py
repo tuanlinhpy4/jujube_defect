@@ -112,6 +112,34 @@ class Conv(nn.Module):
 
 
 # ============================================================
+# Deterministic global-average-pool helpers
+# ------------------------------------------------------------
+# nn.AdaptiveAvgPool2d has no deterministic CUDA backward, which crashes
+# training when torch.use_deterministic_algorithms(True) is set (as
+# train.py does for seed reproducibility). x.mean(dim=..., keepdim=True)
+# computes the exact same values but has a deterministic backward, so we
+# use it everywhere instead of nn.AdaptiveAvgPool2d.
+# ============================================================
+
+class _GAPFull(nn.Module):
+    """Global average pool -> (B, C, 1, 1)."""
+    def forward(self, x):
+        return x.mean(dim=[2, 3], keepdim=True)
+
+
+class _GAPh(nn.Module):
+    """Average over width only -> (B, C, H, 1)  (replaces AdaptiveAvgPool2d((None,1)))."""
+    def forward(self, x):
+        return x.mean(dim=3, keepdim=True)
+
+
+class _GAPw(nn.Module):
+    """Average over height only -> (B, C, 1, W)  (replaces AdaptiveAvgPool2d((1,None)))."""
+    def forward(self, x):
+        return x.mean(dim=2, keepdim=True)
+
+
+# ============================================================
 # DropPath
 # ============================================================
 
@@ -148,7 +176,7 @@ class DCSE(nn.Module):
         self.act2 = nn.SiLU()
 
         hidden = max(1, c2 // reduction)
-        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.gap = _GAPFull()
         self.fc1 = nn.Conv2d(c2, hidden, kernel_size=1)
         self.relu = nn.ReLU(inplace=True)
         self.fc2 = nn.Conv2d(hidden, c2, kernel_size=1)
@@ -173,8 +201,8 @@ class RCA(nn.Module):
         super().__init__()
         self.dwconv = nn.Conv2d(c, c, kernel_size=3, padding=1, groups=c, bias=False)
 
-        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
-        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        self.pool_h = _GAPh()
+        self.pool_w = _GAPw()
 
         pad = k_large // 2
         self.large_h = nn.Conv2d(c, c, kernel_size=(k_large, 1), padding=(pad, 0), groups=c, bias=False)
@@ -289,14 +317,14 @@ class MBCA(nn.Module):
         self.branch_3x3 = Conv(c1, c_b, k=3)
 
         self.branch_global = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
+            _GAPFull(),
             nn.Conv2d(c1, c_b, kernel_size=1, bias=False),
         )
 
         self.groups_shuffle = groups_shuffle if c2 % groups_shuffle == 0 else 1
 
         hidden = max(1, c2 // reduction)
-        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.gap = _GAPFull()
         self.fc1 = nn.Conv2d(c2, hidden, kernel_size=1)
         self.relu = nn.ReLU(inplace=True)
         self.fc2 = nn.Conv2d(hidden, c2, kernel_size=1)
@@ -498,7 +526,7 @@ class JujubeYOLO(nn.Module):
         )
 
         ch3, ch4, ch5 = self.backbone_neck.out_channels
-        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.gap = _GAPFull()
         self.dropout = nn.Dropout(drop_rate) if drop_rate > 0 else nn.Identity()
         self.classifier = nn.Linear(ch3 + ch4 + ch5, num_classes)
 
