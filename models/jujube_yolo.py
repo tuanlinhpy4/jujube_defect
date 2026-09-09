@@ -73,6 +73,16 @@ MODEL_CONFIGS = {
                              "use_dcse": False, "use_rcm": True,  "use_mbca": True},
     "full":                {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True},
+
+    # ── speed-oriented (chap nhan giam accuracy de doi lay FPS) ─
+    # Tat RCM (module nang nhat: DW-conv kernel 11x1/1x11 x2, MLP x2 trong
+    # moi bottleneck) + giam width/depth. Giu DCSE (re, van co loi).
+    "jujube_yolo_fast":    {"width_mult": 0.75, "depth_mult": 0.67,
+                             "use_dcse": True,  "use_rcm": False, "use_mbca": True},
+    # Tat ca RCM + MBCA, width/depth nho nhat -> nhanh nhat trong cac
+    # option co san, chap nhan hy sinh accuracy nhieu nhat.
+    "jujube_yolo_lite":    {"width_mult": 0.50, "depth_mult": 0.34,
+                             "use_dcse": True,  "use_rcm": False, "use_mbca": False},
 }
 
 DEFAULT_VARIANT = "jujube_yolo"
