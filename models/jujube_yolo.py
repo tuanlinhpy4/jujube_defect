@@ -83,6 +83,12 @@ MODEL_CONFIGS = {
     # option co san, chap nhan hy sinh accuracy nhieu nhat.
     "jujube_yolo_lite":    {"width_mult": 0.50, "depth_mult": 0.34,
                              "use_dcse": True,  "use_rcm": False, "use_mbca": False},
+    # Toi da toc do, khong quan tam accuracy: tat CA 3 module dac thu
+    # (DCSE -> plain conv, RCM -> plain bottleneck, MBCA -> plain conv),
+    # width/depth toi thieu. Nen ket hop them: giam input resolution
+    # (vd 96-128px), fp16, torch.compile khi inference (xem README).
+    "jujube_yolo_ultra":   {"width_mult": 0.25, "depth_mult": 0.25,
+                             "use_dcse": False, "use_rcm": False, "use_mbca": False},
 }
 
 DEFAULT_VARIANT = "jujube_yolo"
