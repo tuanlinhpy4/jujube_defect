@@ -78,17 +78,21 @@ MODEL_CONFIGS = {
     # Tat RCM (module nang nhat: DW-conv kernel 11x1/1x11 x2, MLP x2 trong
     # moi bottleneck) + giam width/depth. Giu DCSE (re, van co loi).
     "jujube_yolo_fast":    {"width_mult": 0.75, "depth_mult": 0.67,
-                             "use_dcse": True,  "use_rcm": False, "use_mbca": True},
+                             "use_dcse": True,  "use_rcm": False, "use_mbca": True,
+                             "use_neck": False},
     # Tat ca RCM + MBCA, width/depth nho nhat -> nhanh nhat trong cac
     # option co san, chap nhan hy sinh accuracy nhieu nhat.
     "jujube_yolo_lite":    {"width_mult": 0.50, "depth_mult": 0.34,
-                             "use_dcse": True,  "use_rcm": False, "use_mbca": False},
+                             "use_dcse": True,  "use_rcm": False, "use_mbca": False,
+                             "use_neck": False},
     # Toi da toc do, khong quan tam accuracy: tat CA 3 module dac thu
-    # (DCSE -> plain conv, RCM -> plain bottleneck, MBCA -> plain conv),
-    # width/depth toi thieu. Nen ket hop them: giam input resolution
-    # (vd 96-128px), fp16, torch.compile khi inference (xem README).
+    # (DCSE -> plain conv, RCM -> plain bottleneck, MBCA -> plain conv)
+    # + BO NECK FPN/PAN (khong can cho classification), width/depth toi
+    # thieu. Nen ket hop them: giam input resolution (vd 96-128px),
+    # fp16, torch.compile / fuse_model() khi inference (xem README).
     "jujube_yolo_ultra":   {"width_mult": 0.25, "depth_mult": 0.25,
-                             "use_dcse": False, "use_rcm": False, "use_mbca": False},
+                             "use_dcse": False, "use_rcm": False, "use_mbca": False,
+                             "use_neck": False},
 }
 
 DEFAULT_VARIANT = "jujube_yolo"
@@ -411,9 +415,10 @@ class JujubeYOLOBackboneNeck(nn.Module):
     """
 
     def __init__(self, in_channels=3, width_mult=1.0, depth_mult=1.0,
-                 use_dcse=True, use_rcm=True, use_mbca=True):
+                 use_dcse=True, use_rcm=True, use_mbca=True, use_neck=True):
         super().__init__()
 
+        self.use_neck = use_neck
         c = lambda x: _round_ch(x * width_mult)
         n = lambda x: _round_depth(x, depth_mult)
 
@@ -432,6 +437,14 @@ class JujubeYOLOBackboneNeck(nn.Module):
         self.down_p5 = Conv(ch4, ch5, k=3, s=2)                            # 7   -> P5/32
         self.stage_p5 = C3k2(ch5, ch5, n=n(2), e=0.5, use_rcm=use_rcm)    # 8   @ P5/32
         self.sppf = SPPF(ch5, ch5)                                         # 9
+
+        if not use_neck:
+            # Bo hoan toan neck FPN/PAN (khong can cho classification thuan
+            # tuy, chi can cho detection multi-scale). Chi dung feature sau
+            # cung (P5, sau SPPF) -> GAP -> classifier. Giam dang ke compute
+            # (khong con 4 khoi C3k2 phu + upsample/downsample/concat).
+            self.out_channels = (ch5,)
+            return
 
         # ---- neck (FPN top-down + PAN bottom-up); C3k2 ở neck là plain (use_rcm=False), giống Fig.8 ----
         self.up1 = nn.Upsample(scale_factor=2, mode="nearest")
@@ -462,6 +475,9 @@ class JujubeYOLOBackboneNeck(nn.Module):
         feat_p4 = self.stage_p4(x)           # P4/16  (skip sâu, dùng ở neck)
         x = self.down_p5(feat_p4)            # -> P5/32
         feat_p5 = self.sppf(self.stage_p5(x))  # P5/32
+
+        if not self.use_neck:
+            return (feat_p5,)   # classification-only: 1 feature map, bo qua neck
 
         # top-down (FPN)
         u1 = self.up1(feat_p5)                                    # -> P4/16
@@ -531,6 +547,7 @@ class JujubeYOLO(nn.Module):
         use_dcse: bool = True,
         use_rcm: bool = True,
         use_mbca: bool = True,
+        use_neck: bool = True,
         drop_rate: float = 0.0,
     ):
         super().__init__()
@@ -539,12 +556,12 @@ class JujubeYOLO(nn.Module):
             in_channels=in_channels,
             width_mult=width_mult, depth_mult=depth_mult,
             use_dcse=use_dcse, use_rcm=use_rcm, use_mbca=use_mbca,
+            use_neck=use_neck,
         )
 
-        ch3, ch4, ch5 = self.backbone_neck.out_channels
         self.gap = _GAPFull()
         self.dropout = nn.Dropout(drop_rate) if drop_rate > 0 else nn.Identity()
-        self.classifier = nn.Linear(ch3 + ch4 + ch5, num_classes)
+        self.classifier = nn.Linear(sum(self.backbone_neck.out_channels), num_classes)
 
         self.num_classes = num_classes
         self._init_weights()
@@ -562,10 +579,8 @@ class JujubeYOLO(nn.Module):
                     nn.init.zeros_(m.bias)
 
     def forward(self, x):
-        p3, p4, p5 = self.backbone_neck(x)
-        feat = torch.cat([self.gap(p3).flatten(1),
-                           self.gap(p4).flatten(1),
-                           self.gap(p5).flatten(1)], dim=1)
+        feats = self.backbone_neck(x)                       # tuple: (p3,p4,p5) hoac (p5,) neu use_neck=False
+        feat = torch.cat([self.gap(f).flatten(1) for f in feats], dim=1)
         return self.classifier(self.dropout(feat))
 
     def forward_features(self, x):
@@ -617,8 +632,26 @@ def build_model(name: str = "jujube_yolo",
         use_dcse=cfg["use_dcse"],
         use_rcm=cfg["use_rcm"],
         use_mbca=cfg["use_mbca"],
+        use_neck=cfg.get("use_neck", True),
     )
     model.variant_name = name
+    return model
+
+
+# ============================================================
+# Fuse Conv+BN cho inference (chuan YOLO: gop BN vao Conv, giam kernel
+# launch -> them ~10-20% FPS, khong doi ket qua toan hoc). Goi 1 lan
+# SAU KHI load weights va TRUOC KHI benchmark/deploy:
+#     model.eval()
+#     model = fuse_model(model)
+# ============================================================
+
+def fuse_model(model: nn.Module) -> nn.Module:
+    from torch.nn.utils import fuse_conv_bn_eval
+    for m in model.modules():
+        if isinstance(m, Conv) and isinstance(m.bn, nn.BatchNorm2d):
+            m.conv = fuse_conv_bn_eval(m.conv, m.bn)
+            m.bn = nn.Identity()
     return model
 
 
