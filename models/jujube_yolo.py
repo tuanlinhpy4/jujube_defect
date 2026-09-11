@@ -93,6 +93,14 @@ MODEL_CONFIGS = {
     "jujube_yolo_ultra":   {"width_mult": 0.25, "depth_mult": 0.25,
                              "use_dcse": False, "use_rcm": False, "use_mbca": False,
                              "use_neck": False},
+    # Neu infer_benchmark.py cho thay BS=1 la OVERHEAD-BOUND (latency BS=1
+    # gan bang BS=32 chia deu), giam FLOPs them (nhu ultra) se khong an
+    # thua nua — luc do dung config nay: giam SO LUONG LAYER goi tuan tu
+    # (xem FlatBackbone), muc tieu giam latency co dinh do it kernel
+    # launch hon, du FLOPs co the tuong duong ultra.
+    "jujube_yolo_flat":    {"width_mult": 0.50, "depth_mult": 1.0,
+                             "use_dcse": False, "use_rcm": False, "use_mbca": False,
+                             "use_neck": False, "use_flat_backbone": True},
 }
 
 DEFAULT_VARIANT = "jujube_yolo"
@@ -399,6 +407,47 @@ class SPPF(nn.Module):
 
 
 # ============================================================
+# FlatBackbone — toi gian SO LUONG LAYER (khong chi FLOPs)
+# ------------------------------------------------------------
+# Dung khi BS=1 dang OVERHEAD-BOUND (xem infer_benchmark.py): moi lan
+# goi 1 nn.Module la 1 (hoac vai) kernel launch + Python dispatch, ton
+# thoi gian gan nhu co dinh du tensor to hay nho. JujubeYOLOBackboneNeck
+# (use_neck=False) van con ~25-30 lan goi lop (stem 2 conv, 4 stage
+# C3k2, 3 down-conv, SPPF 4 lop). FlatBackbone rut xuong con ~10 lan goi:
+#   - Gop 2 conv stem (stride 2 x2) thanh 1 conv stride-4 duy nhat
+#   - Gop 4 stage C3k2 (P2/P3/P4/P5) thanh 2 stage PlainBottleneck,
+#     nhay thang P3/8 -> P5/32 (bo qua tram P4/16 rieng)
+#   - Bo SPPF (4 lop pooling/conv) — voi input da nho (<=128px) va
+#     model da nong can, loi ich SPPF khong dang so voi chi phi overhead
+# Muc tieu: giam latency BS=1 do it kernel launch hon, chap nhan FLOPs
+# co the tuong duong hoac cao hon mot chut so voi ban khong-neck.
+# ============================================================
+
+class FlatBackbone(nn.Module):
+
+    def __init__(self, in_channels=3, width_mult=1.0):
+        super().__init__()
+        c = lambda x: _round_ch(x * width_mult)
+        c1, c2, c3 = c(64), c(128), c(256)
+
+        self.stem = Conv(in_channels, c1, k=7, s=4)   # gop 2 stride-2 -> 1 stride-4
+        self.down1 = Conv(c1, c2, k=3, s=2)             # -> P3/8
+        self.block1 = PlainBottleneck(c2)
+        self.down2 = Conv(c2, c3, k=3, s=4)             # -> P5/32 thang, bo qua P4/16
+        self.block2 = PlainBottleneck(c3)
+
+        self.out_channels = (c3,)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.down1(x)
+        x = self.block1(x)
+        x = self.down2(x)
+        x = self.block2(x)
+        return (x,)
+
+
+# ============================================================
 # Backbone + Neck (đúng theo 5 tầng của Fig. 8: stem->P2/4->P3/8->P4/16->P5/32)
 # ============================================================
 
@@ -548,16 +597,22 @@ class JujubeYOLO(nn.Module):
         use_rcm: bool = True,
         use_mbca: bool = True,
         use_neck: bool = True,
+        use_flat_backbone: bool = False,
         drop_rate: float = 0.0,
     ):
         super().__init__()
 
-        self.backbone_neck = JujubeYOLOBackboneNeck(
-            in_channels=in_channels,
-            width_mult=width_mult, depth_mult=depth_mult,
-            use_dcse=use_dcse, use_rcm=use_rcm, use_mbca=use_mbca,
-            use_neck=use_neck,
-        )
+        if use_flat_backbone:
+            # bo qua toan bo DCSE/RCM/MBCA/neck — toi gian so luong layer
+            # de giam overhead o BS=1 (xem FlatBackbone o tren)
+            self.backbone_neck = FlatBackbone(in_channels=in_channels, width_mult=width_mult)
+        else:
+            self.backbone_neck = JujubeYOLOBackboneNeck(
+                in_channels=in_channels,
+                width_mult=width_mult, depth_mult=depth_mult,
+                use_dcse=use_dcse, use_rcm=use_rcm, use_mbca=use_mbca,
+                use_neck=use_neck,
+            )
 
         self.gap = _GAPFull()
         self.dropout = nn.Dropout(drop_rate) if drop_rate > 0 else nn.Identity()
@@ -633,6 +688,7 @@ def build_model(name: str = "jujube_yolo",
         use_rcm=cfg["use_rcm"],
         use_mbca=cfg["use_mbca"],
         use_neck=cfg.get("use_neck", True),
+        use_flat_backbone=cfg.get("use_flat_backbone", False),
     )
     model.variant_name = name
     return model
