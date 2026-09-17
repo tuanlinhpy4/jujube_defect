@@ -56,7 +56,7 @@ MODEL_CONFIGS = {
     "jujube_yolo_n":  {"width_mult": 0.50, "depth_mult": 0.34,
                         "use_dcse": True,  "use_rcm": True,  "use_mbca": True},
 
-    # ── ablation, tái hiện Table 2 của bài báo (baseline = YOLOv11n) ─
+    # ── ablation, (baseline = YOLOv11n) 
     "baseline":            {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": False, "use_rcm": False, "use_mbca": False},
     "only_dcse":           {"width_mult": 1.0, "depth_mult": 1.0,
