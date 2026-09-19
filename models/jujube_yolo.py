@@ -57,35 +57,35 @@ MODEL_CONFIGS = {
                         "use_dcse": True,  "use_rcm": True,  "use_mbca": True},
 
     # ── ablation, (baseline = YOLOv11n) 
-    "baseline":            {"width_mult": 1.0, "depth_mult": 1.0,
+    "juyolo_baseline":            {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": False, "use_rcm": False, "use_mbca": False},
-    "only_dcse":           {"width_mult": 1.0, "depth_mult": 1.0,
+    "juyolo_only_dcse":           {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": False, "use_mbca": False},
-    "only_rcm":            {"width_mult": 1.0, "depth_mult": 1.0,
+    "juyolo_only_rcm":            {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": False, "use_rcm": True,  "use_mbca": False},
-    "only_mbca":           {"width_mult": 1.0, "depth_mult": 1.0,
+    "juyolo_only_mbca":           {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": False, "use_rcm": False, "use_mbca": True},
-    "dcse_rcm":            {"width_mult": 1.0, "depth_mult": 1.0,
+    "juyolo_dcse_rcm":            {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": False},
-    "dcse_mbca":           {"width_mult": 1.0, "depth_mult": 1.0,
+    "juyolo_dcse_mbca":           {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": False, "use_mbca": True},
-    "rcm_mbca":            {"width_mult": 1.0, "depth_mult": 1.0,
+    "juyolo_rcm_mbca":            {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": False, "use_rcm": True,  "use_mbca": True},
-    "full":                {"width_mult": 1.0, "depth_mult": 1.0,
+    "juyolo_full":                {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True},
 
-    # ── speed-oriented (chap nhan giam accuracy de doi lay FPS) ─
+    # ── Điều chỉnh lần 1: speed-oriented (chap nhan giam accuracy de doi lay FPS) ─
     # Tat RCM (module nang nhat: DW-conv kernel 11x1/1x11 x2, MLP x2 trong
     # moi bottleneck) + giam width/depth. Giu DCSE (re, van co loi).
     "jujube_yolo_fast":    {"width_mult": 0.75, "depth_mult": 0.67,
                              "use_dcse": True,  "use_rcm": False, "use_mbca": True,
                              "use_neck": False},
-    # Tat ca RCM + MBCA, width/depth nho nhat -> nhanh nhat trong cac
+    # ĐC2: Tat ca RCM + MBCA, width/depth nho nhat -> nhanh nhat trong cac
     # option co san, chap nhan hy sinh accuracy nhieu nhat.
     "jujube_yolo_lite":    {"width_mult": 0.50, "depth_mult": 0.34,
                              "use_dcse": True,  "use_rcm": False, "use_mbca": False,
                              "use_neck": False},
-    # Toi da toc do, khong quan tam accuracy: tat CA 3 module dac thu
+    # ĐC3: Toi da toc do, khong quan tam accuracy: tat CA 3 module dac thu
     # (DCSE -> plain conv, RCM -> plain bottleneck, MBCA -> plain conv)
     # + BO NECK FPN/PAN (khong can cho classification), width/depth toi
     # thieu. Nen ket hop them: giam input resolution (vd 96-128px),
@@ -93,7 +93,7 @@ MODEL_CONFIGS = {
     "jujube_yolo_ultra":   {"width_mult": 0.25, "depth_mult": 0.25,
                              "use_dcse": False, "use_rcm": False, "use_mbca": False,
                              "use_neck": False},
-    # Neu infer_benchmark.py cho thay BS=1 la OVERHEAD-BOUND (latency BS=1
+    # DDC4: Neu infer_benchmark.py cho thay BS=1 la OVERHEAD-BOUND (latency BS=1
     # gan bang BS=32 chia deu), giam FLOPs them (nhu ultra) se khong an
     # thua nua — luc do dung config nay: giam SO LUONG LAYER goi tuan tu
     # (xem FlatBackbone), muc tieu giam latency co dinh do it kernel
