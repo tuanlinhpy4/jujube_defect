@@ -73,6 +73,20 @@ MODEL_CONFIGS = {
                              "use_dcse": False, "use_rcm": True,  "use_mbca": True},
     "juyolo_full":                {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True},
+   # Ví dụ cấu hình bổ sung trong MODEL_CONFIGS:
+MODEL_CONFIGS.update({
+    # Head & Aggregation
+    "juyolo_p5_only": {"width_mult": 1.0, "depth_mult": 1.0, "use_dcse": True, "use_rcm": True, "use_mbca": True, "head_scales": ["p5"]},
+    "juyolo_no_neck": {"width_mult": 1.0, "depth_mult": 1.0, "use_dcse": True, "use_rcm": True, "use_mbca": True, "use_neck": False},
+
+    # Micro Attention
+    "juyolo_rcm_k7":  {"width_mult": 1.0, "depth_mult": 1.0, "use_dcse": True, "use_rcm": True, "use_mbca": True, "rca_k": 7},
+    "juyolo_no_shuffle": {"width_mult": 1.0, "depth_mult": 1.0, "use_dcse": True, "use_rcm": True, "use_mbca": True, "mbca_shuffle": False},
+
+    # Depth & Regularization
+    "juyolo_single_rcm": {"width_mult": 1.0, "depth_mult": 1.0, "use_dcse": True, "use_rcm": True, "use_mbca": True, "rcm_blocks": 1},
+    "juyolo_droppath":   {"width_mult": 1.0, "depth_mult": 1.0, "use_dcse": True, "use_rcm": True, "use_mbca": True, "drop_path_rate": 0.1},
+})
 
     # ── Điều chỉnh lần 1: speed-oriented (chap nhan giam accuracy de doi lay FPS) ─
     # Tat RCM (module nang nhat: DW-conv kernel 11x1/1x11 x2, MLP x2 trong
