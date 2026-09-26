@@ -28,6 +28,25 @@ Kiến trúc module (không đổi so với v1):
     2. C3k2_RCM — thay C3k2 ở backbone (layer 2, 4, 6, 8)
     3. MBCA  — thay conv fusion ở neck (layer 17, 20)
 
+Bổ sung (ablation study mở rộng)
+---------------------------------
+Thêm các tham số/switch để chạy đủ các dòng trong bảng ablation (Head
+Design / Attention / Depth / Regularization); xem MODEL_CONFIGS các key
+bắt đầu bằng "abl_" và tham số tương ứng trong JujubeYOLO.__init__:
+    - head_mode: "multi_scale" | "dual_scale" (P4+P5) | "single_scale" (P5)
+    - rca_kernel: kernel lớn trong RCA (mặc định 11, ablation dùng 7)
+    - rcm_mlp_ratio: hệ số mở rộng MLP trong RCM (mặc định 2, ablation 1)
+    - rcm_n: số khối RCM/bottleneck (mặc định 2, ablation 1)
+    - mbca_use_channel_shuffle / mbca_use_global_branch: bật/tắt 2 cơ chế
+      con trong MBCA
+    - c3k2_n_override: ép cứng số lần lặp bottleneck trong MỌI khối C3k2
+      (ablation "Stage depth n=1")
+    - drop_path_rate: DropPath trên nhánh residual của mỗi bottleneck
+    - drop_rate: Dropout trước lớp Linear phân loại (đã có sẵn từ trước,
+      chỉ mới được nối vào build_model() ở bản này)
+"Resolution: Input 160x160" không cần sửa kiến trúc (model full-conv +
+GAP nên nhận H,W bất kỳ) — chỉ là metadata "input_size" để dataloader đọc.
+
 Chạy:
     python jujube_yolo.py
 """
@@ -73,7 +92,65 @@ MODEL_CONFIGS = {
                              "use_dcse": False, "use_rcm": True,  "use_mbca": True},
     "juyolo_full":                {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True},
-  
+
+    # ── Ablation Study bổ sung (bảng "Mẫu bảng Ablation Study hoàn chỉnh
+    #    đề xuất cho bài báo/báo cáo") ─────────────────────────────────
+    # Dòng "Reference: Jujube-YOLO v2 (Full proposal)" của bảng chính là
+    # "jujube_yolo" / "juyolo_full" ở trên (width/depth_mult=1.0, cả 3
+    # module DCSE+RCM+MBCA bật, use_neck=True mặc định) — không lặp lại
+    # entry ở đây. Mỗi dòng dưới đây chỉ đổi ĐÚNG 1 trục so với baseline
+    # đó, các trục còn lại giữ nguyên baseline để ablation "sạch".
+
+    # -- Group: Head Design --------------------------------------------
+    "abl_head_single_p5":  {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "head_mode": "single_scale"},          # Single-scale GAP (P5 only)
+    "abl_head_dual_p4p5":  {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "head_mode": "dual_scale"},            # Dual-scale GAP (P4 + P5)
+    "abl_head_no_neck":    {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "use_neck": False},                    # Neck removed (Backbone-only)
+
+    # -- Group: Attention -------------------------------------------------
+    "abl_rca_k7":           {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "rca_kernel": 7},                      # RCA large kernel k=7 (thay vì 11)
+    "abl_rcm_no_mlp":       {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "rcm_mlp_ratio": 1},                   # RCM without MLP (mlp_ratio=1)
+    "abl_mbca_no_shuffle":  {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "mbca_use_channel_shuffle": False},    # MBCA w/o Channel Shuffle
+    "abl_mbca_no_global":   {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "mbca_use_global_branch": False},      # MBCA w/o Global Branch
+
+    # -- Group: Depth -------------------------------------------------
+    "abl_rcm_single":       {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "rcm_n": 1},                           # Single-RCM Bottleneck (1 RCM/block)
+    "abl_c3k2_n1":          {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "c3k2_n_override": 1},                 # Stage depth n=1 (trong C3k2)
+
+    # -- Group: Regularization -----------------------------------------
+    "abl_droppath_01":      {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "drop_path_rate": 0.1},                # With DropPath (p=0.1)
+    "abl_dropout_02":       {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "drop_rate": 0.2},                     # Classifier Dropout (p=0.2)
+
+    # -- Group: Resolution ------------------------------------------------
+    # Model ở đây là full-conv + GAP nên không phụ thuộc kích thước ảnh
+    # đầu vào (không có lớp Linear/reshape cố định theo H,W) -> không cần
+    # sửa kiến trúc. "input_size" chỉ là metadata để train.py/dataloader
+    # đọc và resize ảnh về 160x160 thay vì 224x224; model tự nhận input
+    # size nào cũng chạy được (GAP xử lý H,W bất kỳ).
+    "abl_input_160":        {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "input_size": 160},                    # Input 160x160 (thay vì 224)
 
     # ── Điều chỉnh lần 1: speed-oriented (chap nhan giam accuracy de doi lay FPS) ─
     # Tat RCM (module nang nhat: DW-conv kernel 11x1/1x11 x2, MLP x2 trong
@@ -108,7 +185,7 @@ DEFAULT_VARIANT = "jujube_yolo"
 
 
 # ============================================================
-# Utility
+# Utility:
 # ============================================================
 
 def _round_ch(c: float, divisor: int = 8):
@@ -259,11 +336,15 @@ class RCA(nn.Module):
 
 
 class RCM(nn.Module):
-    """Fout = rho( xiF(xiC(P_H(x) (+) P_V(x))) (x) x ) + x   -- Eq. (2)."""
+    """Fout = rho( xiF(xiC(P_H(x) (+) P_V(x))) (x) x ) + x   -- Eq. (2).
 
-    def __init__(self, c, mlp_ratio=2):
+    k_large: kernel lớn dùng trong RCA (mặc định 11 theo paper). Ablation
+    'RCA large kernel k=7' truyền k_large=7 vào đây.
+    """
+
+    def __init__(self, c, mlp_ratio=2, k_large=11):
         super().__init__()
-        self.rca = RCA(c)
+        self.rca = RCA(c, k_large=k_large)
         self.bn = nn.BatchNorm2d(c)
         hidden = c * mlp_ratio
         self.mlp = nn.Sequential(
@@ -279,39 +360,56 @@ class RCM(nn.Module):
 
 
 class RCMBottleneck(nn.Module):
-    """2 khối RCM residual liên tiếp (Fig. 6, phải)."""
+    """N khối RCM residual liên tiếp (Fig. 6, phải; mặc định N=2).
 
-    def __init__(self, c):
+    Ablation (nhóm Depth, bảng ablation): n_rcm=1 -> 'Single-RCM Bottleneck
+    (1 RCM per block)', chỉ dùng rcm1, bỏ rcm2.
+    Ablation (nhóm Regularization): drop_path_rate>0 -> 'With DropPath
+    (p=0.1)', áp DropPath lên nhánh residual (rcm1/rcm2), trước khi cộng x.
+    """
+
+    def __init__(self, c, mlp_ratio=2, rca_kernel=11, n_rcm=2, drop_path_rate=0.0):
         super().__init__()
-        self.rcm1 = RCM(c)
-        self.rcm2 = RCM(c)
+        assert n_rcm in (1, 2), "RCMBottleneck: n_rcm chỉ hỗ trợ 1 hoặc 2 (theo Fig.6)"
+        self.rcm1 = RCM(c, mlp_ratio=mlp_ratio, k_large=rca_kernel)
+        self.rcm2 = RCM(c, mlp_ratio=mlp_ratio, k_large=rca_kernel) if n_rcm == 2 else None
+        self.drop_path = DropPath(drop_path_rate)
 
     def forward(self, x):
-        return x + self.rcm2(self.rcm1(x))
+        y = self.rcm1(x)
+        if self.rcm2 is not None:
+            y = self.rcm2(y)
+        return x + self.drop_path(y)
 
 
 class PlainBottleneck(nn.Module):
     """Bottleneck chuẩn (Conv3x3-Conv3x3 + residual) — dùng khi ablation use_rcm=False."""
 
-    def __init__(self, c):
+    def __init__(self, c, drop_path_rate=0.0):
         super().__init__()
         self.cv1 = Conv(c, c, k=3)
         self.cv2 = Conv(c, c, k=3)
+        self.drop_path = DropPath(drop_path_rate)
 
     def forward(self, x):
-        return x + self.cv2(self.cv1(x))
+        return x + self.drop_path(self.cv2(self.cv1(x)))
 
 
 class C3k2(nn.Module):
     """Khối CSP-style C3k2 của YOLOv11, inner-bottleneck chọn RCMBottleneck
     (use_rcm=True, -> C3k2_RCM) hoặc PlainBottleneck (ablation / neck)."""
 
-    def __init__(self, c1, c2, n=1, e=0.5, use_rcm=True):
+    def __init__(self, c1, c2, n=1, e=0.5, use_rcm=True,
+                 rca_kernel=11, rcm_mlp_ratio=2, rcm_n=2, drop_path_rate=0.0):
         super().__init__()
         c_ = int(c2 * e)
         self.cv1 = Conv(c1, 2 * c_, k=1)
         self.cv2 = Conv((2 + n) * c_, c2, k=1)
-        block = (lambda: RCMBottleneck(c_)) if use_rcm else (lambda: PlainBottleneck(c_))
+        if use_rcm:
+            block = lambda: RCMBottleneck(c_, mlp_ratio=rcm_mlp_ratio, rca_kernel=rca_kernel,
+                                           n_rcm=rcm_n, drop_path_rate=drop_path_rate)
+        else:
+            block = lambda: PlainBottleneck(c_, drop_path_rate=drop_path_rate)
         self.m = nn.ModuleList(block() for _ in range(n))
 
     def forward(self, x):
@@ -329,7 +427,8 @@ class MBCA(nn.Module):
     """4 nhánh song song (1x1 / DW+PW / 3x3 / global-pool) -> concat -> channel
     shuffle -> channel attention (SE-style) -> residual skip connection."""
 
-    def __init__(self, c1, c2, k=3, reduction=8, groups_shuffle=4):
+    def __init__(self, c1, c2, k=3, reduction=8, groups_shuffle=4,
+                 use_channel_shuffle=True, use_global_branch=True):
         super().__init__()
         assert c2 % 4 == 0, "MBCA: c2 phải chia hết cho 4 (1 nhánh / phần tư)"
         c_b = c2 // 4
@@ -345,11 +444,21 @@ class MBCA(nn.Module):
 
         self.branch_3x3 = Conv(c1, c_b, k=3)
 
-        self.branch_global = nn.Sequential(
-            _GAPFull(),
-            nn.Conv2d(c1, c_b, kernel_size=1, bias=False),
-        )
+        # Ablation 'MBCA w/o Global Branch': thay vì bỏ hẳn nhánh thứ 4 (sẽ
+        # vừa giảm tham số vừa giảm cơ chế, gây nhiễu kết quả), ta giữ
+        # nguyên số kênh c_b nhưng thay GAP toàn cục bằng 1 conv1x1 cục bộ
+        # (không pooling) — cô lập đúng phần đóng góp của "global context",
+        # số tham số gần như không đổi so với bản có global branch.
+        self.use_global_branch = use_global_branch
+        if use_global_branch:
+            self.branch_global = nn.Sequential(
+                _GAPFull(),
+                nn.Conv2d(c1, c_b, kernel_size=1, bias=False),
+            )
+        else:
+            self.branch_global = Conv(c1, c_b, k=1)
 
+        self.use_channel_shuffle = use_channel_shuffle
         self.groups_shuffle = groups_shuffle if c2 % groups_shuffle == 0 else 1
 
         hidden = max(1, c2 // reduction)
@@ -375,10 +484,13 @@ class MBCA(nn.Module):
         b1 = self.branch_1x1(x)
         b2 = self.branch_dw(x)
         b3 = self.branch_3x3(x)
-        b4 = self.branch_global(x).expand(-1, -1, x.shape[2], x.shape[3])
+        b4 = self.branch_global(x)
+        if self.use_global_branch:
+            b4 = b4.expand(-1, -1, x.shape[2], x.shape[3])   # (B,c_b,1,1) -> (B,c_b,H,W)
 
         feat = torch.cat([b1, b2, b3, b4], dim=1)
-        feat = self._channel_shuffle(feat, self.groups_shuffle)
+        if self.use_channel_shuffle:
+            feat = self._channel_shuffle(feat, self.groups_shuffle)
 
         gate = self.sigmoid(self.fc2(self.relu(self.fc1(self.gap(feat)))))
         feat = feat * gate
@@ -465,12 +577,28 @@ class JujubeYOLOBackboneNeck(nn.Module):
     """
 
     def __init__(self, in_channels=3, width_mult=1.0, depth_mult=1.0,
-                 use_dcse=True, use_rcm=True, use_mbca=True, use_neck=True):
+                 use_dcse=True, use_rcm=True, use_mbca=True, use_neck=True,
+                 rca_kernel: int = 11, rcm_mlp_ratio: int = 2, rcm_n: int = 2,
+                 drop_path_rate: float = 0.0,
+                 mbca_use_channel_shuffle: bool = True,
+                 mbca_use_global_branch: bool = True,
+                 c3k2_n_override: Optional[int] = None):
         super().__init__()
 
         self.use_neck = use_neck
         c = lambda x: _round_ch(x * width_mult)
-        n = lambda x: _round_depth(x, depth_mult)
+        # c3k2_n_override (ablation Depth: 'Stage depth n=1 (in C3k2)') ép
+        # cứng số block lặp trong MỌI khối C3k2 (backbone lẫn neck), bỏ qua
+        # depth_mult cho riêng trục này.
+        if c3k2_n_override is not None:
+            n = lambda x: c3k2_n_override
+        else:
+            n = lambda x: _round_depth(x, depth_mult)
+
+        # kwargs dùng chung cho các C3k2 CÓ RCM (4 stage backbone) — ảnh
+        # hưởng bởi 3 dòng ablation nhóm Attention/Depth/Regularization
+        rcm_kwargs = dict(rca_kernel=rca_kernel, rcm_mlp_ratio=rcm_mlp_ratio,
+                           rcm_n=rcm_n, drop_path_rate=drop_path_rate)
 
         ch1, ch2, ch3, ch4, ch5 = c(64), c(128), c(256), c(512), c(1024)
 
@@ -479,13 +607,13 @@ class JujubeYOLOBackboneNeck(nn.Module):
         self.stem2 = stem_block(ch1, ch2, s=2)            # 1            -> P2/4
 
         # ---- backbone (4 stage C3k2_RCM, theo layer 2/4/6/8 của Fig.8) ----
-        self.stage_p2 = C3k2(ch2, ch3, n=n(2), e=0.25, use_rcm=use_rcm)   # 2   @ P2/4
+        self.stage_p2 = C3k2(ch2, ch3, n=n(2), e=0.25, use_rcm=use_rcm, **rcm_kwargs)   # 2   @ P2/4
         self.down_p3 = Conv(ch3, ch3, k=3, s=2)                            # 3   -> P3/8
-        self.stage_p3 = C3k2(ch3, ch4, n=n(2), e=0.25, use_rcm=use_rcm)   # 4   @ P3/8  (skip nông)
+        self.stage_p3 = C3k2(ch3, ch4, n=n(2), e=0.25, use_rcm=use_rcm, **rcm_kwargs)   # 4   @ P3/8  (skip nông)
         self.down_p4 = Conv(ch4, ch4, k=3, s=2)                            # 5   -> P4/16
-        self.stage_p4 = C3k2(ch4, ch4, n=n(2), e=0.5, use_rcm=use_rcm)    # 6   @ P4/16 (skip sâu)
+        self.stage_p4 = C3k2(ch4, ch4, n=n(2), e=0.5, use_rcm=use_rcm, **rcm_kwargs)    # 6   @ P4/16 (skip sâu)
         self.down_p5 = Conv(ch4, ch5, k=3, s=2)                            # 7   -> P5/32
-        self.stage_p5 = C3k2(ch5, ch5, n=n(2), e=0.5, use_rcm=use_rcm)    # 8   @ P5/32
+        self.stage_p5 = C3k2(ch5, ch5, n=n(2), e=0.5, use_rcm=use_rcm, **rcm_kwargs)    # 8   @ P5/32
         self.sppf = SPPF(ch5, ch5)                                         # 9
 
         if not use_neck:
@@ -497,20 +625,31 @@ class JujubeYOLOBackboneNeck(nn.Module):
             return
 
         # ---- neck (FPN top-down + PAN bottom-up); C3k2 ở neck là plain (use_rcm=False), giống Fig.8 ----
+        # (neck luôn dùng PlainBottleneck nên rca_kernel/rcm_mlp_ratio/rcm_n
+        # không áp dụng ở đây; chỉ drop_path_rate vẫn được truyền xuống)
         self.up1 = nn.Upsample(scale_factor=2, mode="nearest")
-        self.c3k2_n1 = C3k2(ch5 + ch4, ch4, n=n(2), e=0.5, use_rcm=False)   # 12/13 @ P4/16
+        self.c3k2_n1 = C3k2(ch5 + ch4, ch4, n=n(2), e=0.5, use_rcm=False,
+                             drop_path_rate=drop_path_rate)                 # 12/13 @ P4/16
         self.up2 = nn.Upsample(scale_factor=2, mode="nearest")
-        self.c3k2_n2 = C3k2(ch4 + ch4, ch3, n=n(2), e=0.5, use_rcm=False)   # 15/16 @ P3/8 -> P3 out
+        self.c3k2_n2 = C3k2(ch4 + ch4, ch3, n=n(2), e=0.5, use_rcm=False,
+                             drop_path_rate=drop_path_rate)                 # 15/16 @ P3/8 -> P3 out
 
-        fuse_block = MBCA if use_mbca else (lambda c1, c2: Conv(c1, c2, k=3))
+        if use_mbca:
+            fuse_block = lambda c1, c2: MBCA(c1, c2,
+                                              use_channel_shuffle=mbca_use_channel_shuffle,
+                                              use_global_branch=mbca_use_global_branch)
+        else:
+            fuse_block = lambda c1, c2: Conv(c1, c2, k=3)
         self.fuse_p3 = fuse_block(ch3, ch3)                                  # 17
 
         self.down_n1 = Conv(ch3, ch3, k=3, s=2)
-        self.c3k2_n3 = C3k2(ch3 + ch4, ch4, n=n(2), e=0.5, use_rcm=False)   # 18/19 @ P4/16 -> P4 out
+        self.c3k2_n3 = C3k2(ch3 + ch4, ch4, n=n(2), e=0.5, use_rcm=False,
+                             drop_path_rate=drop_path_rate)                 # 18/19 @ P4/16 -> P4 out
         self.fuse_p4 = fuse_block(ch4, ch4)                                  # 20
 
         self.down_n2 = Conv(ch4, ch4, k=3, s=2)
-        self.c3k2_n4 = C3k2(ch4 + ch5, ch5, n=n(2), e=0.5, use_rcm=False)   # 21/22 @ P5/32 -> P5 out
+        self.c3k2_n4 = C3k2(ch4 + ch5, ch5, n=n(2), e=0.5, use_rcm=False,
+                             drop_path_rate=drop_path_rate)                 # 21/22 @ P5/32 -> P5 out
 
         self.out_channels = (ch3, ch4, ch5)
 
@@ -600,12 +739,33 @@ class JujubeYOLO(nn.Module):
         use_neck: bool = True,
         use_flat_backbone: bool = False,
         drop_rate: float = 0.0,
+        head_mode: str = "multi_scale",
+        rca_kernel: int = 11,
+        rcm_mlp_ratio: int = 2,
+        rcm_n: int = 2,
+        drop_path_rate: float = 0.0,
+        mbca_use_channel_shuffle: bool = True,
+        mbca_use_global_branch: bool = True,
+        c3k2_n_override: Optional[int] = None,
     ):
         super().__init__()
 
+        # head_mode — nhóm ablation "Head Design" (bảng ablation):
+        #   "multi_scale" (mặc định, không đổi hành vi cũ): GAP(P3)+GAP(P4)+GAP(P5)
+        #   "dual_scale" : chỉ GAP(P4)+GAP(P5) -> "Dual-scale GAP (P4 + P5)"
+        #                  (cần use_neck=True để backbone_neck trả về >=2 scale)
+        #   "single_scale": chỉ GAP(P5)        -> "Single-scale GAP (P5 only)"
+        # Lưu ý: khác với use_neck=False ("Neck removed"), head_mode vẫn
+        # chạy đầy đủ neck FPN/PAN, chỉ đổi việc head DÙNG feature nào.
+        assert head_mode in ("multi_scale", "dual_scale", "single_scale"), \
+            f"head_mode không hợp lệ: {head_mode!r}"
+        self.head_mode = head_mode
+
         if use_flat_backbone:
             # bo qua toan bo DCSE/RCM/MBCA/neck — toi gian so luong layer
-            # de giam overhead o BS=1 (xem FlatBackbone o tren)
+            # de giam overhead o BS=1 (xem FlatBackbone o tren). FlatBackbone
+            # khong nhan cac tham so ablation attention/depth/neck ben duoi
+            # vi no khong dung DCSE/RCM/MBCA/neck.
             self.backbone_neck = FlatBackbone(in_channels=in_channels, width_mult=width_mult)
         else:
             self.backbone_neck = JujubeYOLOBackboneNeck(
@@ -613,11 +773,29 @@ class JujubeYOLO(nn.Module):
                 width_mult=width_mult, depth_mult=depth_mult,
                 use_dcse=use_dcse, use_rcm=use_rcm, use_mbca=use_mbca,
                 use_neck=use_neck,
+                rca_kernel=rca_kernel, rcm_mlp_ratio=rcm_mlp_ratio, rcm_n=rcm_n,
+                drop_path_rate=drop_path_rate,
+                mbca_use_channel_shuffle=mbca_use_channel_shuffle,
+                mbca_use_global_branch=mbca_use_global_branch,
+                c3k2_n_override=c3k2_n_override,
             )
+
+        out_ch = self.backbone_neck.out_channels
+        if head_mode == "single_scale":
+            in_feat = out_ch[-1]
+        elif head_mode == "dual_scale":
+            assert len(out_ch) >= 2, (
+                "head_mode='dual_scale' cần backbone_neck trả về >=2 scale "
+                "(dùng use_neck=True); hiện chỉ có "
+                f"{len(out_ch)} scale."
+            )
+            in_feat = sum(out_ch[-2:])
+        else:
+            in_feat = sum(out_ch)
 
         self.gap = _GAPFull()
         self.dropout = nn.Dropout(drop_rate) if drop_rate > 0 else nn.Identity()
-        self.classifier = nn.Linear(sum(self.backbone_neck.out_channels), num_classes)
+        self.classifier = nn.Linear(in_feat, num_classes)
 
         self.num_classes = num_classes
         self._init_weights()
@@ -636,6 +814,10 @@ class JujubeYOLO(nn.Module):
 
     def forward(self, x):
         feats = self.backbone_neck(x)                       # tuple: (p3,p4,p5) hoac (p5,) neu use_neck=False
+        if self.head_mode == "single_scale":
+            feats = feats[-1:]                               # chỉ P5
+        elif self.head_mode == "dual_scale":
+            feats = feats[-2:]                                # P4 + P5
         feat = torch.cat([self.gap(f).flatten(1) for f in feats], dim=1)
         return self.classifier(self.dropout(feat))
 
@@ -690,6 +872,15 @@ def build_model(name: str = "jujube_yolo",
         use_mbca=cfg["use_mbca"],
         use_neck=cfg.get("use_neck", True),
         use_flat_backbone=cfg.get("use_flat_backbone", False),
+        drop_rate=cfg.get("drop_rate", 0.0),
+        head_mode=cfg.get("head_mode", "multi_scale"),
+        rca_kernel=cfg.get("rca_kernel", 11),
+        rcm_mlp_ratio=cfg.get("rcm_mlp_ratio", 2),
+        rcm_n=cfg.get("rcm_n", 2),
+        drop_path_rate=cfg.get("drop_path_rate", 0.0),
+        mbca_use_channel_shuffle=cfg.get("mbca_use_channel_shuffle", True),
+        mbca_use_global_branch=cfg.get("mbca_use_global_branch", True),
+        c3k2_n_override=cfg.get("c3k2_n_override", None),
     )
     model.variant_name = name
     return model
