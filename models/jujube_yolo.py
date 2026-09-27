@@ -151,6 +151,14 @@ MODEL_CONFIGS = {
     "abl_input_160":        {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
                              "input_size": 160},                    # Input 160x160 (thay vì 224)
+    # 64x64: tổng stride của backbone là /32 (5 lớp stride-2) nên P5 chỉ
+    # còn 2x2 — model vẫn chạy được (đã trace tay từng shape, không lỗi),
+    # nhưng neck FPN/PAN gần như vô nghĩa ở kích thước này (upsample/concat
+    # trên feature map 2x2-4x4-8x8 mất phần lớn thông tin không gian).
+    # Nên cân nhắc dùng chung với use_neck=False thay vì để full neck.
+    "abl_input_64":         {"width_mult": 1.0, "depth_mult": 1.0,
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
+                             "input_size": 64},                     # Input 64x64 (thay vì 224)
 
     # ── Điều chỉnh lần 1: speed-oriented (chap nhan giam accuracy de doi lay FPS) ─
     # Tat RCM (module nang nhat: DW-conv kernel 11x1/1x11 x2, MLP x2 trong
@@ -179,6 +187,16 @@ MODEL_CONFIGS = {
     "jujube_yolo_flat":    {"width_mult": 0.50, "depth_mult": 1.0,
                              "use_dcse": False, "use_rcm": False, "use_mbca": False,
                              "use_neck": False, "use_flat_backbone": True},
+
+    # Giống hệt "jujube_yolo_flat" ở trên (0 DCSE/RCM/MBCA, không neck,
+    # FlatBackbone), chỉ khác input_size=64 thay vì 224 mặc định. Combo
+    # này "sạch" nhất trong các cách giảm resolution vì flat backbone vốn
+    # đã không có neck để bị vô nghĩa hoá ở feature map bé (xem trace P5
+    # co còn 2x2 ở input 64px trong docstring đầu file).
+    "jujube_yolo_flat_64": {"width_mult": 0.50, "depth_mult": 1.0,
+                             "use_dcse": False, "use_rcm": False, "use_mbca": False,
+                             "use_neck": False, "use_flat_backbone": True,
+                             "input_size": 64},
 }
 
 DEFAULT_VARIANT = "jujube_yolo"
@@ -909,15 +927,15 @@ def fuse_model(model: nn.Module) -> nn.Module:
 
 if __name__ == "__main__":
 
-    x = torch.randn(2, 3, 224, 224)
+    print(f"{'Variant':<20} {'Input':>7}  {'Params':>12}  {'Size(MB)':>9}  {'Output'}")
+    print("-" * 75)
 
-    print(f"{'Variant':<14} {'Params':>12}  {'Size(MB)':>9}  {'Output'}")
-    print("-" * 60)
-
-    for name in MODEL_CONFIGS:
+    for name, cfg in MODEL_CONFIGS.items():
+        size = cfg.get("input_size", 224)           # đọc metadata resolution nếu có (vd abl_input_64/160)
+        x = torch.randn(2, 3, size, size)
         m = build_model(name, num_classes=5)
         m.eval()
         with torch.no_grad():
             y = m(x)
         p = m.count_parameters()
-        print(f"{name:<14} {p:>12,}  {p * 4 / 1024 / 1024:>9.2f}  {tuple(y.shape)}")
+        print(f"{name:<20} {size:>4}px  {p:>12,}  {p * 4 / 1024 / 1024:>9.2f}  {tuple(y.shape)}")
