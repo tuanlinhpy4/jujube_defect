@@ -1,51 +1,101 @@
 """
-Jujube-YOLO v2 — DCSE + C3k2_RCM + MBCA (classification variant, fixed)
+Jujube-YOLO v3 — DCSE + C3k2_RCM + MBCA (classification variant)
 ------------------------------------------------------------------------
 
 Dựa trên: Wang, L. et al. (2025). "Jujube-YOLO: a precise jujube fruit
 recognition model in unstructured environments." Expert Systems With
 Applications, 291, 128530. https://doi.org/10.1016/j.eswa.2025.128530
 
-Thay đổi so với v1
+Lịch sử thay đổi
 -------------------
-1. FIX BUG: v1 dùng nhầm feature map ở P2/4 (stride 4) làm skip-connection
-   cho nhánh upsample thứ 2 trong neck, trong khi nhánh đó đang ở P3/8
-   (stride 8) -> lệch kích thước -> RuntimeError khi concat. v2 đặt lại tên
-   biến rõ ràng theo đúng 5 tầng backbone của Fig. 8 (P2/4, P3/8, P4/16,
-   P5/32) và nối đúng tầng.
-2. CHUYỂN THÀNH CLASSIFIER: bản gốc trong paper là detector (trả về 3
-   feature map box+cls). Để dùng trực tiếp với harness classification
-   (train.py: cross-entropy, ảnh 224x224, num_classes=N) giống format
-   EdgeJuFormer, forward() ở đây trả về logits (B, num_classes) bằng cách
-   GAP từng scale P3/P4/P5 rồi concat -> Linear. Việc dùng cả 3 scale (thay
-   vì chỉ P5) giúp giữ lại thông tin nứt/mốc/sâu ở mức chi tiết nông (P3)
-   lẫn ngữ nghĩa sâu (P5) — phù hợp bài toán phân loại chất lượng quả.
-   DetectHead (đầu dò object detection gốc) vẫn được giữ lại trong file,
-   không dùng mặc định, cho ai cần bài toán detection thật sự.
+v1 -> v2: fix bug nối nhầm feature map P2/4 làm skip-connection cho nhánh
+đang ở P3/8 trong neck; chuyển từ detector sang classifier (GAP đa scale
+P3+P4+P5 -> Linear); thêm bộ tham số ablation (head_mode, rca_kernel,
+rcm_mlp_ratio, rcm_n, mbca_*, c3k2_n_override, drop_path_rate, drop_rate)
+và các variant tối ưu tốc độ (fast/lite/ultra/flat).
 
-Kiến trúc module (không đổi so với v1):
-    1. DCSE  — stem, thay 2 conv đầu (layer 0, 1)
-    2. C3k2_RCM — thay C3k2 ở backbone (layer 2, 4, 6, 8)
-    3. MBCA  — thay conv fusion ở neck (layer 17, 20)
+v2 -> v3 (bản này): SỬA VẤN ĐỀ ACCURACY KÉM KHI INPUT GIẢM TỪ 224 XUỐNG 64.
+====================================================================
+Bối cảnh: file config huấn luyện thực tế (jujube_ours.yaml) đã hạ
+input_size từ 224 xuống 64 để tăng tốc độ. Benchmark thực đo cho thấy khi
+input=224, "jujube_yolo_flat" đạt accuracy CAO NHẤT (89.11%) trong mọi
+model được so sánh; nhưng khi input=64 (giữ NGUYÊN kiến trúc v2, chỉ đổi
+input_size ở dataloader), "jujube_yolo_flat" tụt xuống 86.02% — THẤP HƠN
+cả juyolo_baseline (87.25%) và nhiều baseline nông khác (tinynet_e,
+repghostnet_050, regnetx_002). Nguyên nhân không phải bug runtime (model
+vẫn chạy được, không crash) mà là SAI LỆCH THIẾT KẾ giữa độ sâu backbone
+và độ phân giải ảnh đầu vào:
 
-Bổ sung (ablation study mở rộng)
----------------------------------
-Thêm các tham số/switch để chạy đủ các dòng trong bảng ablation (Head
-Design / Attention / Depth / Regularization); xem MODEL_CONFIGS các key
-bắt đầu bằng "abl_" và tham số tương ứng trong JujubeYOLO.__init__:
-    - head_mode: "multi_scale" | "dual_scale" (P4+P5) | "single_scale" (P5)
-    - rca_kernel: kernel lớn trong RCA (mặc định 11, ablation dùng 7)
-    - rcm_mlp_ratio: hệ số mở rộng MLP trong RCM (mặc định 2, ablation 1)
-    - rcm_n: số khối RCM/bottleneck (mặc định 2, ablation 1)
-    - mbca_use_channel_shuffle / mbca_use_global_branch: bật/tắt 2 cơ chế
-      con trong MBCA
-    - c3k2_n_override: ép cứng số lần lặp bottleneck trong MỌI khối C3k2
-      (ablation "Stage depth n=1")
-    - drop_path_rate: DropPath trên nhánh residual của mỗi bottleneck
-    - drop_rate: Dropout trước lớp Linear phân loại (đã có sẵn từ trước,
-      chỉ mới được nối vào build_model() ở bản này)
-"Resolution: Input 160x160" không cần sửa kiến trúc (model full-conv +
-GAP nên nhận H,W bất kỳ) — chỉ là metadata "input_size" để dataloader đọc.
+1) Tổng stride backbone quá sâu so với input 64px.
+   JujubeYOLOBackboneNeck (v2) luôn có 5 lớp stride-2 liên tiếp (stem1,
+   stem2, down_p3, down_p4, down_p5) => tổng stride /32. Với input 224px
+   điều này hợp lý (P5 = 7x7). Nhưng với input 64px, P5 chỉ còn 64/32 =
+   2x2 — gần như toàn bộ thông tin không gian (vết nứt/mốc/sâu vốn là chi
+   tiết nhỏ, cục bộ trên vỏ quả) đã bị "vắt cạn" trước khi model kịp học
+   được gì có ý nghĩa ở tầng sâu.
+   jujube_yolo_flat (FlatBackbone) còn tệ hơn: stem dùng conv 7x7 stride 4
+   NGAY LỚP ĐẦU TIÊN (blur + downsample rất mạnh khi ảnh vốn đã nhỏ), rồi
+   down2 stride 4 nữa => input 64px chỉ còn 2x2 ở output, tương tự.
+
+2) RCA (trong RCM) dùng kernel trục lớn cố định (mặc định 11: conv
+   (11,1) và (1,11)) trên MỌI feature map, bất kể feature map đó lớn hay
+   nhỏ. Ở input 224px, kernel 11 trên feature map 28-56px là hợp lý (nhìn
+   được ngữ cảnh rộng). Nhưng ở input 64px, feature map các stage chỉ còn
+   2-16px => kernel 11 (padding 5 mỗi bên) chủ yếu là ZERO-PADDING, phép
+   tích chập gần như học nhiễu/hằng số thay vì thông tin không gian thật.
+   Đây KHÔNG gây crash (padding vẫn cho ra shape đúng — khớp với việc
+   model "vẫn chạy được" trong log benchmark), nhưng làm loãng tín hiệu.
+   SPPF (maxpool k=5) trên P5 2x2 gặp vấn đề tương tự.
+
+3) Neck FPN/PAN (upsample + concat + C3k2) vốn được chính v2 note trong
+   docstring là "gần như vô nghĩa" ở feature map bé (2x2-8x8), nhưng
+   variant "jujube_yolo" (không phải flat) vẫn BẬT neck mặc định kể cả
+   khi dùng input 64px vì train.py chỉ đổi input_size ở dataloader chứ
+   không đổi kiến trúc model theo.
+
+Hướng sửa (đã áp dụng trong file này):
+   a) Backbone nông có thể cấu hình được: thêm `stem_strides` (1 hoặc 2
+      lớp stride-2 ở stem) và `num_down_stages` (1-3 cặp down_*/stage_p*
+      sau stem). Tổng stride = 2**stem_strides * 2**num_down_stages, MẶC
+      ĐỊNH giữ nguyên 2 và 3 (tổng /32, giống v2 y hệt — KHÔNG đổi hành vi
+      của các variant cũ dùng cho input >=224px). Các variant mới
+      "*_64" dùng stem_strides=1, num_down_stages=2 => tổng stride chỉ
+      /8, feature map cuối với input 64px là 8x8 (thay vì 2x2) — giữ lại
+      đủ chi tiết không gian cho các vết nứt/mốc/sâu nhỏ.
+   b) Khi num_down_stages < 3, neck FPN/PAN tự động bị TẮT (neck cần đủ
+      3 scale P3/P4/P5). forward() khi đó trả về TOÀN BỘ feature map thô
+      của các stage đã xây (vd (P2,P3,P4)) thay vì chỉ 1 scale sâu nhất
+      như v2 — nhờ vậy head multi_scale vẫn tận dụng được thông tin đa
+      tầng (nông + sâu) mà không tốn chi phí neck vô nghĩa ở feature map
+      bé.
+   c) `input_size` (tuỳ chọn) được truyền xuống backbone để TỰ ĐỘNG giới
+      hạn (clamp) rca_kernel và sppf_kernel không vượt quá kích thước
+      feature map thực tế của từng stage — không còn tình trạng kernel
+      lớn hơn hẳn feature map như mục (2) ở trên. Nếu không truyền
+      input_size, hành vi giữ nguyên như v2 (không tự clamp).
+   d) FlatBackbone: stem_k / stem_stride / down2_stride giờ cấu hình
+      được (mặc định 7/4/4 — giữ nguyên v2). Variant "jujube_yolo_flat_64"
+      dùng stem_k=3, stem_stride=2, down2_stride=2 => tổng stride /8
+      thay vì /32, đồng thời kernel stem nhỏ hơn (3 thay vì 7) để không
+      "làm mờ" chi tiết bề mặt quả ngay ở lớp đầu.
+   e) Cảnh báo runtime (warnings.warn) một lần khi feature map sâu nhất
+      dự kiến < 4x4, để tránh lặp lại sai lầm này với các input nhỏ khác
+      trong tương lai.
+
+   => 2 variant MỚI khuyến nghị dùng cho jujube_ours.yaml (input_size=64):
+        - "jujube_yolo_64"       (thay cho "jujube_yolo")
+        - "jujube_yolo_flat_64"  (đã sửa lại, thay cho bản "jujube_yolo_flat"
+                                   cũ — entry cùng tên trong MODEL_CONFIGS
+                                   giờ trỏ tới kiến trúc nông hơn)
+   Variant "abl_input_64" được GIỮ NGUYÊN như v2 (kiến trúc sâu /32,
+   không auto-clamp kiến trúc) để làm điểm đối chứng "input nhỏ nhưng
+   không sửa kiến trúc" — chính là cấu hình đã cho kết quả kém trong
+   benchmark thực tế.
+
+Kiến trúc module (không đổi so với v2):
+    1. DCSE  — stem
+    2. C3k2_RCM — backbone (thay C3k2 chuẩn)
+    3. MBCA  — conv fusion ở neck
 
 Chạy:
     python jujube_yolo.py
@@ -54,6 +104,7 @@ Chạy:
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Optional
 
 import torch
@@ -67,7 +118,10 @@ import torch.nn as nn
 ARCH_NAME = "jujube_yolo"
 
 MODEL_CONFIGS = {
-    # ── kích thước (giống scaling n/s của YOLO) ────────────────
+    # ── kích thước gốc (thiết kế cho input ~224px, giống scaling n/s của
+    #    YOLO). KHÔNG khuyến nghị dùng trực tiếp các variant này cho input
+    #    nhỏ (<=96px) — xem nhóm "*_64" ở cuối dict, được thiết kế riêng
+    #    cho input nhỏ (xem mục "v2 -> v3" trong docstring đầu file). ────
     "jujube_yolo":    {"width_mult": 1.00, "depth_mult": 1.00,
                         "use_dcse": True,  "use_rcm": True,  "use_mbca": True},
     "jujube_yolo_s":  {"width_mult": 0.75, "depth_mult": 0.67,
@@ -75,7 +129,7 @@ MODEL_CONFIGS = {
     "jujube_yolo_n":  {"width_mult": 0.50, "depth_mult": 0.34,
                         "use_dcse": True,  "use_rcm": True,  "use_mbca": True},
 
-    # ── ablation, (baseline = YOLOv11n) 
+    # ── ablation, (baseline = YOLOv11n)
     "juyolo_baseline":            {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": False, "use_rcm": False, "use_mbca": False},
     "juyolo_only_dcse":           {"width_mult": 1.0, "depth_mult": 1.0,
@@ -93,117 +147,128 @@ MODEL_CONFIGS = {
     "juyolo_full":                {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True},
 
-    # ── Ablation Study bổ sung (bảng "Mẫu bảng Ablation Study hoàn chỉnh
-    #    đề xuất cho bài báo/báo cáo") ─────────────────────────────────
-    # Dòng "Reference: Jujube-YOLO v2 (Full proposal)" của bảng chính là
-    # "jujube_yolo" / "juyolo_full" ở trên (width/depth_mult=1.0, cả 3
-    # module DCSE+RCM+MBCA bật, use_neck=True mặc định) — không lặp lại
-    # entry ở đây. Mỗi dòng dưới đây chỉ đổi ĐÚNG 1 trục so với baseline
-    # đó, các trục còn lại giữ nguyên baseline để ablation "sạch".
-
+    # ── Ablation Study bổ sung ──────────────────────────────────────────
     # -- Group: Head Design --------------------------------------------
     "abl_head_single_p5":  {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "head_mode": "single_scale"},          # Single-scale GAP (P5 only)
+                             "head_mode": "single_scale"},
     "abl_head_dual_p4p5":  {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "head_mode": "dual_scale"},            # Dual-scale GAP (P4 + P5)
+                             "head_mode": "dual_scale"},
     "abl_head_no_neck":    {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "use_neck": False},                    # Neck removed (Backbone-only)
+                             "use_neck": False},
 
     # -- Group: Attention -------------------------------------------------
     "abl_rca_k7":           {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "rca_kernel": 7},                      # RCA large kernel k=7 (thay vì 11)
+                             "rca_kernel": 7},
     "abl_rcm_no_mlp":       {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "rcm_mlp_ratio": 1},                   # RCM without MLP (mlp_ratio=1)
+                             "rcm_mlp_ratio": 1},
     "abl_mbca_no_shuffle":  {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "mbca_use_channel_shuffle": False},    # MBCA w/o Channel Shuffle
+                             "mbca_use_channel_shuffle": False},
     "abl_mbca_no_global":   {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "mbca_use_global_branch": False},      # MBCA w/o Global Branch
+                             "mbca_use_global_branch": False},
 
     # -- Group: Depth -------------------------------------------------
     "abl_rcm_single":       {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "rcm_n": 1},                           # Single-RCM Bottleneck (1 RCM/block)
+                             "rcm_n": 1},
     "abl_c3k2_n1":          {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "c3k2_n_override": 1},                 # Stage depth n=1 (trong C3k2)
+                             "c3k2_n_override": 1},
 
     # -- Group: Regularization -----------------------------------------
     "abl_droppath_01":      {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "drop_path_rate": 0.1},                # With DropPath (p=0.1)
+                             "drop_path_rate": 0.1},
     "abl_dropout_02":       {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "drop_rate": 0.2},                     # Classifier Dropout (p=0.2)
+                             "drop_rate": 0.2},
 
     # -- Group: Resolution ------------------------------------------------
-    # Model ở đây là full-conv + GAP nên không phụ thuộc kích thước ảnh
-    # đầu vào (không có lớp Linear/reshape cố định theo H,W) -> không cần
-    # sửa kiến trúc. "input_size" chỉ là metadata để train.py/dataloader
-    # đọc và resize ảnh về 160x160 thay vì 224x224; model tự nhận input
-    # size nào cũng chạy được (GAP xử lý H,W bất kỳ).
     "abl_input_160":        {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "input_size": 160},                    # Input 160x160 (thay vì 224)
-    # 64x64: tổng stride của backbone là /32 (5 lớp stride-2) nên P5 chỉ
-    # còn 2x2 — model vẫn chạy được (đã trace tay từng shape, không lỗi),
-    # nhưng neck FPN/PAN gần như vô nghĩa ở kích thước này (upsample/concat
-    # trên feature map 2x2-4x4-8x8 mất phần lớn thông tin không gian).
-    # Nên cân nhắc dùng chung với use_neck=False thay vì để full neck.
+                             "input_size": 160},
+    # GIỮ NGUYÊN kiến trúc sâu /32 của v2, chỉ đổi input_size xuống 64 —
+    # đây CHÍNH LÀ cấu hình "input nhỏ nhưng không sửa kiến trúc" đã cho
+    # kết quả kém trong benchmark thực tế (bảng đen trong yêu cầu sửa).
+    # Dùng entry này làm ĐỐI CHỨNG cho ablation "resolution", KHÔNG dùng
+    # để train thật — với input 64px thật sự, hãy dùng "jujube_yolo_64"
+    # ở nhóm v3 bên dưới.
     "abl_input_64":         {"width_mult": 1.0, "depth_mult": 1.0,
                              "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "input_size": 64},                     # Input 64x64 (thay vì 224)
+                             "input_size": 64},
 
     # ── Điều chỉnh lần 1: speed-oriented (chap nhan giam accuracy de doi lay FPS) ─
-    # Tat RCM (module nang nhat: DW-conv kernel 11x1/1x11 x2, MLP x2 trong
-    # moi bottleneck) + giam width/depth. Giu DCSE (re, van co loi).
     "jujube_yolo_fast":    {"width_mult": 0.75, "depth_mult": 0.67,
                              "use_dcse": True,  "use_rcm": False, "use_mbca": True,
                              "use_neck": False},
-    # ĐC2: Tat ca RCM + MBCA, width/depth nho nhat -> nhanh nhat trong cac
-    # option co san, chap nhan hy sinh accuracy nhieu nhat.
     "jujube_yolo_lite":    {"width_mult": 0.50, "depth_mult": 0.34,
                              "use_dcse": True,  "use_rcm": False, "use_mbca": False,
                              "use_neck": False},
-    # ĐC3: Toi da toc do, khong quan tam accuracy: tat CA 3 module dac thu
-    # (DCSE -> plain conv, RCM -> plain bottleneck, MBCA -> plain conv)
-    # + BO NECK FPN/PAN (khong can cho classification), width/depth toi
-    # thieu. Nen ket hop them: giam input resolution (vd 96-128px),
-    # fp16, torch.compile / fuse_model() khi inference (xem README).
     "jujube_yolo_ultra":   {"width_mult": 0.25, "depth_mult": 0.25,
                              "use_dcse": False, "use_rcm": False, "use_mbca": False,
                              "use_neck": False},
-    # DDC4: Neu infer_benchmark.py cho thay BS=1 la OVERHEAD-BOUND (latency BS=1
-    # gan bang BS=32 chia deu), giam FLOPs them (nhu ultra) se khong an
-    # thua nua — luc do dung config nay: giam SO LUONG LAYER goi tuan tu
-    # (xem FlatBackbone), muc tieu giam latency co dinh do it kernel
-    # launch hon, du FLOPs co the tuong duong ultra.
     "jujube_yolo_flat":    {"width_mult": 0.50, "depth_mult": 1.0,
                              "use_dcse": False, "use_rcm": False, "use_mbca": False,
                              "use_neck": False, "use_flat_backbone": True},
+    # (thiết kế cho input >=~128px; xem "jujube_yolo_flat_64" bên dưới cho
+    # input 64px — đây là entry đã bị SỬA so với v2, không còn dùng
+    # stem 7x7/stride4 + down2 stride4 nữa, xem nhóm v3 bên dưới)
 
-    # Giống hệt "jujube_yolo_flat" ở trên (0 DCSE/RCM/MBCA, không neck,
-    # FlatBackbone), chỉ khác input_size=64 thay vì 224 mặc định. Combo
-    # này "sạch" nhất trong các cách giảm resolution vì flat backbone vốn
-    # đã không có neck để bị vô nghĩa hoá ở feature map bé (xem trace P5
-    # co còn 2x2 ở input 64px trong docstring đầu file).
-    "jujube_yolo_flat_64": {"width_mult": 0.50, "depth_mult": 1.0,
-                             "use_dcse": False, "use_rcm": False, "use_mbca": False,
-                             "use_neck": False, "use_flat_backbone": True,
-                             "input_size": 64},
+    # ================================================================
+    # NHÓM MỚI (v3): thiết kế riêng cho input NHỎ (jujube_ours.yaml hiện
+    # dùng input_size: 64). Xem phân tích chi tiết ở docstring đầu file,
+    # mục "v2 -> v3". Đây là các variant NÊN dùng thay cho "jujube_yolo"
+    # / "jujube_yolo_flat" khi train với input 64px.
+    # ================================================================
+    "jujube_yolo_64": {
+        "width_mult": 1.00, "depth_mult": 1.00,
+        "use_dcse": True, "use_rcm": True, "use_mbca": True,
+        "stem_strides": 1, "num_down_stages": 2,   # tổng stride /8 (thay vì /32)
+        "use_neck": False,                          # neck vô nghĩa ở feature map bé, đã tự tắt do num_down_stages<3
+        "input_size": 64,                           # dùng để auto-clamp rca_kernel/sppf_kernel theo từng stage
+    },
+    "jujube_yolo_64_s": {
+        "width_mult": 0.75, "depth_mult": 0.67,
+        "use_dcse": True, "use_rcm": True, "use_mbca": True,
+        "stem_strides": 1, "num_down_stages": 2,
+        "use_neck": False,
+        "input_size": 64,
+    },
+    # SỬA lại "jujube_yolo_flat_64" (trước đây kế thừa nguyên FlatBackbone
+    # của v2: stem 7x7/stride4 + down2 stride4 -> tổng stride /32 -> P5
+    # chỉ 2x2 với input 64px). Bản v3 dùng stem 3x3/stride2 + down2
+    # stride2 -> tổng stride /8 -> feature map cuối 8x8.
+    "jujube_yolo_flat_64": {
+        "width_mult": 0.50, "depth_mult": 1.0,
+        "use_dcse": False, "use_rcm": False, "use_mbca": False,
+        "use_neck": False, "use_flat_backbone": True,
+        "flat_stem_k": 3, "flat_stem_stride": 2, "flat_down2_stride": 2,
+        "input_size": 64,
+    },
+
+    # DDC4 (giữ nguyên v2 — dùng cho input lớn/flat-backbone chuẩn):
+    "jujube_yolo_flat_64_legacy_deep32": {
+        # bản GỐC v2 của "jujube_yolo_flat_64" (tổng stride /32, P5=2x2 ở
+        # input 64px) — giữ lại chỉ để so sánh đối chứng trong ablation,
+        # KHÔNG khuyến nghị dùng để train thật.
+        "width_mult": 0.50, "depth_mult": 1.0,
+        "use_dcse": False, "use_rcm": False, "use_mbca": False,
+        "use_neck": False, "use_flat_backbone": True,
+        "input_size": 64,
+    },
 }
 
 DEFAULT_VARIANT = "jujube_yolo"
 
 
 # ============================================================
-# Utility:
+# Utility
 # ============================================================
 
 def _round_ch(c: float, divisor: int = 8):
@@ -220,6 +285,25 @@ def autopad(k, p=None, d=1):
     if p is None:
         p = k // 2 if isinstance(k, int) else [x // 2 for x in k]
     return p
+
+
+def _clamp_odd_kernel(k: int, feat_size: Optional[int]) -> int:
+    """Giới hạn kernel k không vượt quá kích thước feature map (feat_size).
+
+    Lý do (xem docstring đầu file, mục v2->v3): các module RCA/SPPF dùng
+    kernel lớn cố định (11, 5, ...) được thiết kế cho input ~224px, nơi
+    feature map đủ lớn để kernel đó "nhìn" được ngữ cảnh thật. Khi input
+    nhỏ (64px), feature map có thể bé hơn hẳn kernel -> phần lớn kernel
+    chỉ nhân với zero-padding, làm loãng tín hiệu không gian thay vì rút
+    trích ngữ cảnh. Hàm này không đổi hành vi khi feat_size is None (giữ
+    nguyên k như v2, không auto-clamp) hoặc khi k đã <= feat_size.
+    """
+    if feat_size is None or feat_size <= 0:
+        return k
+    k = min(k, feat_size)
+    if k % 2 == 0:
+        k -= 1
+    return max(1, k)
 
 
 class Conv(nn.Module):
@@ -252,13 +336,13 @@ class _GAPFull(nn.Module):
 
 
 class _GAPh(nn.Module):
-    """Average over width only -> (B, C, H, 1)  (replaces AdaptiveAvgPool2d((None,1)))."""
+    """Average over width only -> (B, C, H, 1)."""
     def forward(self, x):
         return x.mean(dim=3, keepdim=True)
 
 
 class _GAPw(nn.Module):
-    """Average over height only -> (B, C, 1, W)  (replaces AdaptiveAvgPool2d((1,None)))."""
+    """Average over height only -> (B, C, 1, W)."""
     def forward(self, x):
         return x.mean(dim=2, keepdim=True)
 
@@ -356,8 +440,9 @@ class RCA(nn.Module):
 class RCM(nn.Module):
     """Fout = rho( xiF(xiC(P_H(x) (+) P_V(x))) (x) x ) + x   -- Eq. (2).
 
-    k_large: kernel lớn dùng trong RCA (mặc định 11 theo paper). Ablation
-    'RCA large kernel k=7' truyền k_large=7 vào đây.
+    k_large: kernel lớn dùng trong RCA (mặc định 11 theo paper, có thể bị
+    JujubeYOLOBackboneNeck tự clamp nhỏ hơn nếu biết input_size — xem
+    _clamp_odd_kernel).
     """
 
     def __init__(self, c, mlp_ratio=2, k_large=11):
@@ -378,13 +463,7 @@ class RCM(nn.Module):
 
 
 class RCMBottleneck(nn.Module):
-    """N khối RCM residual liên tiếp (Fig. 6, phải; mặc định N=2).
-
-    Ablation (nhóm Depth, bảng ablation): n_rcm=1 -> 'Single-RCM Bottleneck
-    (1 RCM per block)', chỉ dùng rcm1, bỏ rcm2.
-    Ablation (nhóm Regularization): drop_path_rate>0 -> 'With DropPath
-    (p=0.1)', áp DropPath lên nhánh residual (rcm1/rcm2), trước khi cộng x.
-    """
+    """N khối RCM residual liên tiếp (Fig. 6, phải; mặc định N=2)."""
 
     def __init__(self, c, mlp_ratio=2, rca_kernel=11, n_rcm=2, drop_path_rate=0.0):
         super().__init__()
@@ -462,11 +541,6 @@ class MBCA(nn.Module):
 
         self.branch_3x3 = Conv(c1, c_b, k=3)
 
-        # Ablation 'MBCA w/o Global Branch': thay vì bỏ hẳn nhánh thứ 4 (sẽ
-        # vừa giảm tham số vừa giảm cơ chế, gây nhiễu kết quả), ta giữ
-        # nguyên số kênh c_b nhưng thay GAP toàn cục bằng 1 conv1x1 cục bộ
-        # (không pooling) — cô lập đúng phần đóng góp của "global context",
-        # số tham số gần như không đổi so với bản có global branch.
         self.use_global_branch = use_global_branch
         if use_global_branch:
             self.branch_global = nn.Sequential(
@@ -504,7 +578,7 @@ class MBCA(nn.Module):
         b3 = self.branch_3x3(x)
         b4 = self.branch_global(x)
         if self.use_global_branch:
-            b4 = b4.expand(-1, -1, x.shape[2], x.shape[3])   # (B,c_b,1,1) -> (B,c_b,H,W)
+            b4 = b4.expand(-1, -1, x.shape[2], x.shape[3])
 
         feat = torch.cat([b1, b2, b3, b4], dim=1)
         if self.use_channel_shuffle:
@@ -517,7 +591,7 @@ class MBCA(nn.Module):
 
 
 # ============================================================
-# SPPF (khối chuẩn YOLO, không đổi so với YOLOv11)
+# SPPF (khối chuẩn YOLO)
 # ============================================================
 
 class SPPF(nn.Module):
@@ -540,31 +614,29 @@ class SPPF(nn.Module):
 # ============================================================
 # FlatBackbone — toi gian SO LUONG LAYER (khong chi FLOPs)
 # ------------------------------------------------------------
-# Dung khi BS=1 dang OVERHEAD-BOUND (xem infer_benchmark.py): moi lan
-# goi 1 nn.Module la 1 (hoac vai) kernel launch + Python dispatch, ton
-# thoi gian gan nhu co dinh du tensor to hay nho. JujubeYOLOBackboneNeck
-# (use_neck=False) van con ~25-30 lan goi lop (stem 2 conv, 4 stage
-# C3k2, 3 down-conv, SPPF 4 lop). FlatBackbone rut xuong con ~10 lan goi:
-#   - Gop 2 conv stem (stride 2 x2) thanh 1 conv stride-4 duy nhat
-#   - Gop 4 stage C3k2 (P2/P3/P4/P5) thanh 2 stage PlainBottleneck,
-#     nhay thang P3/8 -> P5/32 (bo qua tram P4/16 rieng)
-#   - Bo SPPF (4 lop pooling/conv) — voi input da nho (<=128px) va
-#     model da nong can, loi ich SPPF khong dang so voi chi phi overhead
-# Muc tieu: giam latency BS=1 do it kernel launch hon, chap nhan FLOPs
-# co the tuong duong hoac cao hon mot chut so voi ban khong-neck.
+# v3: stem_k / stem_stride / down2_stride nay co the tuy chinh (truoc day
+# co dinh k=7, s=4 cho stem va s=4 cho down2 -> tong stride /32, qua sau
+# cho input nho). Mac dinh GIU NGUYEN gia tri v2 (khong doi hanh vi cua
+# variant "jujube_yolo_flat", input >=224px). Variant "jujube_yolo_flat_64"
+# trong MODEL_CONFIGS truyen stem_k=3, stem_stride=2, down2_stride=2 ->
+# tong stride /8 thay vi /32 (feature map cuoi 8x8 thay vi 2x2 voi input
+# 64px), dong thoi kernel stem nho hon (3 thay vi 7) giup giu chi tiet be
+# mat qua (vet nut/moc/sau) thay vi bi "lam mo" ngay lop dau bo i conv 7x7
+# stride 4.
 # ============================================================
 
 class FlatBackbone(nn.Module):
 
-    def __init__(self, in_channels=3, width_mult=1.0):
+    def __init__(self, in_channels=3, width_mult=1.0,
+                 stem_k=7, stem_stride=4, down2_stride=4):
         super().__init__()
         c = lambda x: _round_ch(x * width_mult)
         c1, c2, c3 = c(64), c(128), c(256)
 
-        self.stem = Conv(in_channels, c1, k=7, s=4)   # gop 2 stride-2 -> 1 stride-4
-        self.down1 = Conv(c1, c2, k=3, s=2)             # -> P3/8
+        self.stem = Conv(in_channels, c1, k=stem_k, s=stem_stride)
+        self.down1 = Conv(c1, c2, k=3, s=2)
         self.block1 = PlainBottleneck(c2)
-        self.down2 = Conv(c2, c3, k=3, s=4)             # -> P5/32 thang, bo qua P4/16
+        self.down2 = Conv(c2, c3, k=3, s=down2_stride)
         self.block2 = PlainBottleneck(c3)
 
         self.out_channels = (c3,)
@@ -579,19 +651,38 @@ class FlatBackbone(nn.Module):
 
 
 # ============================================================
-# Backbone + Neck (đúng theo 5 tầng của Fig. 8: stem->P2/4->P3/8->P4/16->P5/32)
+# Backbone + Neck
 # ============================================================
 
 class JujubeYOLOBackboneNeck(nn.Module):
     """
-    Backbone (stem DCSE x2 -> C3k2_RCM x4 -> SPPF) + Neck FPN/PAN
-    (upsample/concat -> C3k2 -> MBCA), trả về 3 feature map P3/P4/P5.
+    Backbone (stem -> C3k2_RCM nhiều stage) [+ Neck FPN/PAN tuỳ chọn].
 
-    QUAN TRỌNG (fix so với v1): mỗi tầng backbone chỉ được lưu MỘT LẦN vào
-    một biến duy nhất (feat_p2/feat_p3/feat_p4/feat_p5), không tái sử dụng
-    tên biến giữa các tầng khác resolution — đây chính là nguyên nhân lỗi
-    "Sizes of tensors must match" ở bản v1 (nối nhầm P2/4 với nhánh đang ở
-    P3/8).
+    v3 — backbone không còn cố định 5 lớp stride-2 (tổng /32) cho MỌI
+    input (xem phân tích ở docstring đầu file). Hai tham số mới điều
+    khiển độ sâu downsample:
+        stem_strides    : 1 hoặc 2 lớp stride-2 ở stem (mặc định 2, giống
+                           v2 — DCSE x2 -> P2/4).
+        num_down_stages : số cặp (down_*, stage_p*) được xây SAU stem, tối
+                           đa 3 (down_p3, down_p4, down_p5), mặc định 3
+                           (giống v2 — đủ P3/P4/P5).
+    Tổng stride = 2**stem_strides * 2**num_down_stages. Mặc định (2, 3)
+    cho tổng /32 y hệt v2 — KHÔNG đổi hành vi của các variant cũ dùng cho
+    input >=224px. Các variant "*_64" dùng (1, 2) -> tổng /8.
+
+    Khi num_down_stages < 3, neck FPN/PAN KHÔNG được xây (neck cần đủ 3
+    scale P3/P4/P5) — use_neck tự động bị ép về False (kèm cảnh báo nếu
+    người dùng truyền use_neck=True). Khi use_neck=False, forward() trả
+    về TOÀN BỘ feature map thô của các stage đã xây (vd (P2,P3,P4)), thay
+    vì chỉ scale sâu nhất như v2 — head multi_scale của JujubeYOLO vẫn
+    tận dụng được thông tin đa tầng mà không tốn chi phí neck (chính v2
+    đã nhận định neck "gần như vô nghĩa" ở feature map bé).
+
+    input_size (tuỳ chọn, pixel): nếu được truyền, dùng để TÍNH TRƯỚC kích
+    thước feature map của từng stage, qua đó tự động giới hạn (clamp)
+    rca_kernel và sppf_kernel không vượt quá feature map thực tế tại stage
+    đó (xem _clamp_odd_kernel). Không truyền -> giữ hành vi v2 (không tự
+    clamp).
     """
 
     def __init__(self, in_channels=3, width_mult=1.0, depth_mult=1.0,
@@ -600,57 +691,116 @@ class JujubeYOLOBackboneNeck(nn.Module):
                  drop_path_rate: float = 0.0,
                  mbca_use_channel_shuffle: bool = True,
                  mbca_use_global_branch: bool = True,
-                 c3k2_n_override: Optional[int] = None):
+                 c3k2_n_override: Optional[int] = None,
+                 stem_strides: int = 2,
+                 num_down_stages: int = 3,
+                 input_size: Optional[int] = None,
+                 sppf_kernel: int = 5):
         super().__init__()
 
+        assert stem_strides in (1, 2), "stem_strides chỉ hỗ trợ 1 hoặc 2"
+        assert num_down_stages in (1, 2, 3), "num_down_stages chỉ hỗ trợ 1, 2 hoặc 3"
+
+        if num_down_stages < 3 and use_neck:
+            warnings.warn(
+                f"JujubeYOLOBackboneNeck: use_neck=True nhưng num_down_stages="
+                f"{num_down_stages} < 3 -> neck FPN/PAN cần đủ P3/P4/P5 nên tự "
+                f"động tắt neck (use_neck=False)."
+            )
+            use_neck = False
         self.use_neck = use_neck
+
         c = lambda x: _round_ch(x * width_mult)
-        # c3k2_n_override (ablation Depth: 'Stage depth n=1 (in C3k2)') ép
-        # cứng số block lặp trong MỌI khối C3k2 (backbone lẫn neck), bỏ qua
-        # depth_mult cho riêng trục này.
         if c3k2_n_override is not None:
             n = lambda x: c3k2_n_override
         else:
             n = lambda x: _round_depth(x, depth_mult)
 
-        # kwargs dùng chung cho các C3k2 CÓ RCM (4 stage backbone) — ảnh
-        # hưởng bởi 3 dòng ablation nhóm Attention/Depth/Regularization
-        rcm_kwargs = dict(rca_kernel=rca_kernel, rcm_mlp_ratio=rcm_mlp_ratio,
-                           rcm_n=rcm_n, drop_path_rate=drop_path_rate)
+        rcm_common = dict(rcm_mlp_ratio=rcm_mlp_ratio, rcm_n=rcm_n,
+                           drop_path_rate=drop_path_rate)
 
         ch1, ch2, ch3, ch4, ch5 = c(64), c(128), c(256), c(512), c(1024)
 
         stem_block = DCSE if use_dcse else (lambda c1, c2, s: Conv(c1, c2, k=3, s=s))
-        self.stem1 = stem_block(in_channels, ch1, s=2)   # 0            -> P1/2
-        self.stem2 = stem_block(ch1, ch2, s=2)            # 1            -> P2/4
 
-        # ---- backbone (4 stage C3k2_RCM, theo layer 2/4/6/8 của Fig.8) ----
-        self.stage_p2 = C3k2(ch2, ch3, n=n(2), e=0.25, use_rcm=use_rcm, **rcm_kwargs)   # 2   @ P2/4
-        self.down_p3 = Conv(ch3, ch3, k=3, s=2)                            # 3   -> P3/8
-        self.stage_p3 = C3k2(ch3, ch4, n=n(2), e=0.25, use_rcm=use_rcm, **rcm_kwargs)   # 4   @ P3/8  (skip nông)
-        self.down_p4 = Conv(ch4, ch4, k=3, s=2)                            # 5   -> P4/16
-        self.stage_p4 = C3k2(ch4, ch4, n=n(2), e=0.5, use_rcm=use_rcm, **rcm_kwargs)    # 6   @ P4/16 (skip sâu)
-        self.down_p5 = Conv(ch4, ch5, k=3, s=2)                            # 7   -> P5/32
-        self.stage_p5 = C3k2(ch5, ch5, n=n(2), e=0.5, use_rcm=use_rcm, **rcm_kwargs)    # 8   @ P5/32
-        self.sppf = SPPF(ch5, ch5)                                         # 9
+        # ---- stem: 1 hoặc 2 lớp stride-2 ----
+        if stem_strides == 2:
+            self.stem1 = stem_block(in_channels, ch1, s=2)
+            self.stem2 = stem_block(ch1, ch2, s=2)
+        else:
+            # 1 lớp duy nhất -> giữ độ phân giải gấp đôi so với mặc định
+            # ngay từ đầu mạng, quan trọng khi input đã nhỏ sẵn (64px)
+            self.stem1 = stem_block(in_channels, ch2, s=2)
+            self.stem2 = None
+        stem_total_stride = 2 ** stem_strides
 
-        if not use_neck:
-            # Bo hoan toan neck FPN/PAN (khong can cho classification thuan
-            # tuy, chi can cho detection multi-scale). Chi dung feature sau
-            # cung (P5, sau SPPF) -> GAP -> classifier. Giam dang ke compute
-            # (khong con 4 khoi C3k2 phu + upsample/downsample/concat).
-            self.out_channels = (ch5,)
+        # ---- kích thước feature map dự kiến từng stage (để auto-clamp kernel) ----
+        def _feat_size(total_stride):
+            if input_size is None:
+                return None
+            return max(1, input_size // total_stride)
+
+        size_p2 = _feat_size(stem_total_stride)
+        size_p3 = _feat_size(stem_total_stride * 2)
+        size_p4 = _feat_size(stem_total_stride * 4)
+        size_p5 = _feat_size(stem_total_stride * 8)
+
+        def _rca_k(size):
+            return _clamp_odd_kernel(rca_kernel, size)
+
+        if input_size is not None:
+            deepest_size = [size_p2, size_p3, size_p4, size_p5][num_down_stages]
+            if deepest_size is not None and deepest_size < 4:
+                warnings.warn(
+                    f"JujubeYOLOBackboneNeck: với input_size={input_size} và cấu "
+                    f"hình hiện tại (stem_strides={stem_strides}, "
+                    f"num_down_stages={num_down_stages}), feature map sâu nhất chỉ "
+                    f"còn {deepest_size}x{deepest_size} — khá bé, cân nhắc giảm "
+                    f"num_down_stages hoặc dùng stem_strides=1 để giữ nhiều chi "
+                    f"tiết không gian hơn."
+                )
+
+        # ---- backbone stages (P2 luôn có; P3/P4/P5 tuỳ num_down_stages) ----
+        self.stage_p2 = C3k2(ch2, ch3, n=n(2), e=0.25, use_rcm=use_rcm,
+                              rca_kernel=_rca_k(size_p2), **rcm_common)
+        self._raw_ch = [ch3]
+
+        self.down_p3 = self.stage_p3 = None
+        self.down_p4 = self.stage_p4 = None
+        self.down_p5 = self.stage_p5 = self.sppf = None
+
+        if num_down_stages >= 1:
+            self.down_p3 = Conv(ch3, ch3, k=3, s=2)
+            self.stage_p3 = C3k2(ch3, ch4, n=n(2), e=0.25, use_rcm=use_rcm,
+                                  rca_kernel=_rca_k(size_p3), **rcm_common)
+            self._raw_ch.append(ch4)
+        if num_down_stages >= 2:
+            self.down_p4 = Conv(ch4, ch4, k=3, s=2)
+            self.stage_p4 = C3k2(ch4, ch4, n=n(2), e=0.5, use_rcm=use_rcm,
+                                  rca_kernel=_rca_k(size_p4), **rcm_common)
+            self._raw_ch.append(ch4)
+        if num_down_stages >= 3:
+            self.down_p5 = Conv(ch4, ch5, k=3, s=2)
+            self.stage_p5 = C3k2(ch5, ch5, n=n(2), e=0.5, use_rcm=use_rcm,
+                                  rca_kernel=_rca_k(size_p5), **rcm_common)
+            sk = _clamp_odd_kernel(sppf_kernel, size_p5) if size_p5 is not None else sppf_kernel
+            self.sppf = SPPF(ch5, ch5, k=sk)
+            self._raw_ch.append(ch5)
+
+        if not self.use_neck:
+            # classification-only, không dùng neck: trả về TẤT CẢ feature
+            # map thô đã xây (đa scale, rẻ hơn neck FPN/PAN nhiều)
+            self.out_channels = tuple(self._raw_ch)
             return
 
-        # ---- neck (FPN top-down + PAN bottom-up); C3k2 ở neck là plain (use_rcm=False), giống Fig.8 ----
-        # (neck luôn dùng PlainBottleneck nên rca_kernel/rcm_mlp_ratio/rcm_n
-        # không áp dụng ở đây; chỉ drop_path_rate vẫn được truyền xuống)
+        # ---- neck (chỉ xây khi num_down_stages == 3, giữ nguyên như v2);
+        # C3k2 ở neck là plain (use_rcm=False), giống Fig.8 ----
         self.up1 = nn.Upsample(scale_factor=2, mode="nearest")
         self.c3k2_n1 = C3k2(ch5 + ch4, ch4, n=n(2), e=0.5, use_rcm=False,
-                             drop_path_rate=drop_path_rate)                 # 12/13 @ P4/16
+                             drop_path_rate=drop_path_rate)
         self.up2 = nn.Upsample(scale_factor=2, mode="nearest")
         self.c3k2_n2 = C3k2(ch4 + ch4, ch3, n=n(2), e=0.5, use_rcm=False,
-                             drop_path_rate=drop_path_rate)                 # 15/16 @ P3/8 -> P3 out
+                             drop_path_rate=drop_path_rate)
 
         if use_mbca:
             fuse_block = lambda c1, c2: MBCA(c1, c2,
@@ -658,47 +808,60 @@ class JujubeYOLOBackboneNeck(nn.Module):
                                               use_global_branch=mbca_use_global_branch)
         else:
             fuse_block = lambda c1, c2: Conv(c1, c2, k=3)
-        self.fuse_p3 = fuse_block(ch3, ch3)                                  # 17
+        self.fuse_p3 = fuse_block(ch3, ch3)
 
         self.down_n1 = Conv(ch3, ch3, k=3, s=2)
         self.c3k2_n3 = C3k2(ch3 + ch4, ch4, n=n(2), e=0.5, use_rcm=False,
-                             drop_path_rate=drop_path_rate)                 # 18/19 @ P4/16 -> P4 out
-        self.fuse_p4 = fuse_block(ch4, ch4)                                  # 20
+                             drop_path_rate=drop_path_rate)
+        self.fuse_p4 = fuse_block(ch4, ch4)
 
         self.down_n2 = Conv(ch4, ch4, k=3, s=2)
         self.c3k2_n4 = C3k2(ch4 + ch5, ch5, n=n(2), e=0.5, use_rcm=False,
-                             drop_path_rate=drop_path_rate)                 # 21/22 @ P5/32 -> P5 out
+                             drop_path_rate=drop_path_rate)
 
         self.out_channels = (ch3, ch4, ch5)
 
     def forward(self, x):
         x = self.stem1(x)
-        x = self.stem2(x)                    # P2/4
+        if self.stem2 is not None:
+            x = self.stem2(x)
 
-        feat_p2 = self.stage_p2(x)           # P2/4
-        x = self.down_p3(feat_p2)            # -> P3/8
-        feat_p3 = self.stage_p3(x)           # P3/8   (skip nông, dùng ở neck)
-        x = self.down_p4(feat_p3)            # -> P4/16
-        feat_p4 = self.stage_p4(x)           # P4/16  (skip sâu, dùng ở neck)
-        x = self.down_p5(feat_p4)            # -> P5/32
-        feat_p5 = self.sppf(self.stage_p5(x))  # P5/32
+        feat_p2 = self.stage_p2(x)
+        raw_feats = [feat_p2]
+        x = feat_p2
+
+        feat_p3 = feat_p4 = feat_p5 = None
+        if self.stage_p3 is not None:
+            x = self.down_p3(x)
+            feat_p3 = self.stage_p3(x)
+            raw_feats.append(feat_p3)
+            x = feat_p3
+        if self.stage_p4 is not None:
+            x = self.down_p4(x)
+            feat_p4 = self.stage_p4(x)
+            raw_feats.append(feat_p4)
+            x = feat_p4
+        if self.stage_p5 is not None:
+            x = self.down_p5(x)
+            feat_p5 = self.sppf(self.stage_p5(x))
+            raw_feats.append(feat_p5)
 
         if not self.use_neck:
-            return (feat_p5,)   # classification-only: 1 feature map, bo qua neck
+            return tuple(raw_feats)
 
         # top-down (FPN)
-        u1 = self.up1(feat_p5)                                    # -> P4/16
-        n1 = self.c3k2_n1(torch.cat([u1, feat_p4], dim=1))        # concat @ P4/16 (khớp kích thước)
-        u2 = self.up2(n1)                                         # -> P3/8
-        n2 = self.c3k2_n2(torch.cat([u2, feat_p3], dim=1))        # concat @ P3/8  (khớp kích thước)
+        u1 = self.up1(feat_p5)
+        n1 = self.c3k2_n1(torch.cat([u1, feat_p4], dim=1))
+        u2 = self.up2(n1)
+        n2 = self.c3k2_n2(torch.cat([u2, feat_p3], dim=1))
         p3_out = self.fuse_p3(n2)
 
         # bottom-up (PAN)
-        d1 = self.down_n1(p3_out)                                 # -> P4/16
+        d1 = self.down_n1(p3_out)
         n3 = self.c3k2_n3(torch.cat([d1, n1], dim=1))
         p4_out = self.fuse_p4(n3)
 
-        d2 = self.down_n2(p4_out)                                 # -> P5/32
+        d2 = self.down_n2(p4_out)
         p5_out = self.c3k2_n4(torch.cat([d2, feat_p5], dim=1))
 
         return p3_out, p4_out, p5_out
@@ -730,7 +893,7 @@ class DetectHead(nn.Module):
         outs = []
         for feat, cls_b, box_b in zip(feats, self.cls_branches, self.box_branches):
             outs.append(torch.cat([box_b(feat), cls_b(feat)], dim=1))
-        return outs  # list các tensor (B, 4*reg_max + nc, H, W) cho P3/P4/P5
+        return outs
 
 
 # ============================================================
@@ -740,7 +903,7 @@ class DetectHead(nn.Module):
 class JujubeYOLO(nn.Module):
     """
     Backbone/neck Jujube-YOLO dùng làm feature extractor cho bài toán phân
-    loại ảnh: GAP riêng từng scale P3/P4/P5 rồi concat -> Linear(num_classes).
+    loại ảnh: GAP riêng từng scale rồi concat -> Linear(num_classes).
     forward() trả về logits (B, num_classes), tương thích trực tiếp với
     nn.CrossEntropyLoss trong train.py.
     """
@@ -765,26 +928,36 @@ class JujubeYOLO(nn.Module):
         mbca_use_channel_shuffle: bool = True,
         mbca_use_global_branch: bool = True,
         c3k2_n_override: Optional[int] = None,
+        # --- v3: backbone nông cho input nhỏ + kernel tự-clamp theo input_size ---
+        stem_strides: int = 2,
+        num_down_stages: int = 3,
+        input_size: Optional[int] = None,
+        sppf_kernel: int = 5,
+        flat_stem_k: int = 7,
+        flat_stem_stride: int = 4,
+        flat_down2_stride: int = 4,
     ):
         super().__init__()
 
-        # head_mode — nhóm ablation "Head Design" (bảng ablation):
-        #   "multi_scale" (mặc định, không đổi hành vi cũ): GAP(P3)+GAP(P4)+GAP(P5)
-        #   "dual_scale" : chỉ GAP(P4)+GAP(P5) -> "Dual-scale GAP (P4 + P5)"
-        #                  (cần use_neck=True để backbone_neck trả về >=2 scale)
-        #   "single_scale": chỉ GAP(P5)        -> "Single-scale GAP (P5 only)"
-        # Lưu ý: khác với use_neck=False ("Neck removed"), head_mode vẫn
-        # chạy đầy đủ neck FPN/PAN, chỉ đổi việc head DÙNG feature nào.
+        # head_mode — nhóm ablation "Head Design":
+        #   "multi_scale" (mặc định): GAP toàn bộ scale mà backbone trả về
+        #                  (P3+P4+P5 nếu có neck, hoặc mọi raw stage nếu
+        #                  không có neck)
+        #   "dual_scale" : chỉ GAP 2 scale sâu nhất
+        #   "single_scale": chỉ GAP scale sâu nhất
         assert head_mode in ("multi_scale", "dual_scale", "single_scale"), \
             f"head_mode không hợp lệ: {head_mode!r}"
         self.head_mode = head_mode
 
         if use_flat_backbone:
             # bo qua toan bo DCSE/RCM/MBCA/neck — toi gian so luong layer
-            # de giam overhead o BS=1 (xem FlatBackbone o tren). FlatBackbone
-            # khong nhan cac tham so ablation attention/depth/neck ben duoi
-            # vi no khong dung DCSE/RCM/MBCA/neck.
-            self.backbone_neck = FlatBackbone(in_channels=in_channels, width_mult=width_mult)
+            # de giam overhead o BS=1. flat_stem_k/stride/down2_stride
+            # dieu chinh do sau backbone (xem FlatBackbone).
+            self.backbone_neck = FlatBackbone(
+                in_channels=in_channels, width_mult=width_mult,
+                stem_k=flat_stem_k, stem_stride=flat_stem_stride,
+                down2_stride=flat_down2_stride,
+            )
         else:
             self.backbone_neck = JujubeYOLOBackboneNeck(
                 in_channels=in_channels,
@@ -796,6 +969,10 @@ class JujubeYOLO(nn.Module):
                 mbca_use_channel_shuffle=mbca_use_channel_shuffle,
                 mbca_use_global_branch=mbca_use_global_branch,
                 c3k2_n_override=c3k2_n_override,
+                stem_strides=stem_strides,
+                num_down_stages=num_down_stages,
+                input_size=input_size,
+                sppf_kernel=sppf_kernel,
             )
 
         out_ch = self.backbone_neck.out_channels
@@ -803,9 +980,8 @@ class JujubeYOLO(nn.Module):
             in_feat = out_ch[-1]
         elif head_mode == "dual_scale":
             assert len(out_ch) >= 2, (
-                "head_mode='dual_scale' cần backbone_neck trả về >=2 scale "
-                "(dùng use_neck=True); hiện chỉ có "
-                f"{len(out_ch)} scale."
+                "head_mode='dual_scale' cần backbone_neck trả về >=2 scale; "
+                f"hiện chỉ có {len(out_ch)} scale."
             )
             in_feat = sum(out_ch[-2:])
         else:
@@ -831,16 +1007,16 @@ class JujubeYOLO(nn.Module):
                     nn.init.zeros_(m.bias)
 
     def forward(self, x):
-        feats = self.backbone_neck(x)                       # tuple: (p3,p4,p5) hoac (p5,) neu use_neck=False
+        feats = self.backbone_neck(x)
         if self.head_mode == "single_scale":
-            feats = feats[-1:]                               # chỉ P5
+            feats = feats[-1:]
         elif self.head_mode == "dual_scale":
-            feats = feats[-2:]                                # P4 + P5
+            feats = feats[-2:]
         feat = torch.cat([self.gap(f).flatten(1) for f in feats], dim=1)
         return self.classifier(self.dropout(feat))
 
     def forward_features(self, x):
-        """Trả về 3 feature map thô (P3, P4, P5), hữu ích cho detection/Grad-CAM."""
+        """Trả về các feature map thô, hữu ích cho detection/Grad-CAM."""
         return self.backbone_neck(x)
 
     def count_parameters(self):
@@ -867,6 +1043,11 @@ def jujube_yolo_n(num_classes=4):
     return JujubeYOLO(num_classes=num_classes, width_mult=0.50, depth_mult=0.34)
 
 
+def jujube_yolo_64(num_classes=4):
+    """Bản khuyến nghị cho input 64px (xem MODEL_CONFIGS['jujube_yolo_64'])."""
+    return build_model("jujube_yolo_64", num_classes=num_classes)
+
+
 # ============================================================
 # build_model  (bắt buộc bởi model registry — cùng chữ ký với EdgeJuFormer)
 # ============================================================
@@ -879,6 +1060,15 @@ def build_model(name: str = "jujube_yolo",
     cfg = MODEL_CONFIGS.get(name)
     if cfg is None:
         raise ValueError(f"Unknown variant '{name}'. Choose from: {list(MODEL_CONFIGS)}")
+
+    # input_size: ưu tiên giá trị truyền trực tiếp vào build_model (vd nếu
+    # train.py truyền input_size=cfg['input_size'] từ yaml), nếu không có
+    # thì lấy metadata khai báo sẵn trong MODEL_CONFIGS của variant. Giá
+    # trị này chỉ dùng để auto-clamp rca_kernel/sppf_kernel theo từng
+    # stage (xem JujubeYOLOBackboneNeck) — KHÔNG bắt buộc phải sửa
+    # train.py để có hiệu quả sửa lỗi accuracy (các variant "*_64" đã tự
+    # khai báo input_size=64 sẵn trong MODEL_CONFIGS).
+    input_size = kwargs.pop("input_size", cfg.get("input_size", None))
 
     model = JujubeYOLO(
         num_classes=num_classes,
@@ -899,17 +1089,22 @@ def build_model(name: str = "jujube_yolo",
         mbca_use_channel_shuffle=cfg.get("mbca_use_channel_shuffle", True),
         mbca_use_global_branch=cfg.get("mbca_use_global_branch", True),
         c3k2_n_override=cfg.get("c3k2_n_override", None),
+        # --- v3 ---
+        stem_strides=cfg.get("stem_strides", 2),
+        num_down_stages=cfg.get("num_down_stages", 3),
+        input_size=input_size,
+        sppf_kernel=cfg.get("sppf_kernel", 5),
+        flat_stem_k=cfg.get("flat_stem_k", 7),
+        flat_stem_stride=cfg.get("flat_stem_stride", 4),
+        flat_down2_stride=cfg.get("flat_down2_stride", 4),
+        **kwargs,
     )
     model.variant_name = name
     return model
 
 
 # ============================================================
-# Fuse Conv+BN cho inference (chuan YOLO: gop BN vao Conv, giam kernel
-# launch -> them ~10-20% FPS, khong doi ket qua toan hoc). Goi 1 lan
-# SAU KHI load weights va TRUOC KHI benchmark/deploy:
-#     model.eval()
-#     model = fuse_model(model)
+# Fuse Conv+BN cho inference
 # ============================================================
 
 def fuse_model(model: nn.Module) -> nn.Module:
@@ -927,15 +1122,19 @@ def fuse_model(model: nn.Module) -> nn.Module:
 
 if __name__ == "__main__":
 
-    print(f"{'Variant':<20} {'Input':>7}  {'Params':>12}  {'Size(MB)':>9}  {'Output'}")
-    print("-" * 75)
+    print(f"{'Variant':<32} {'Input':>7}  {'Params':>12}  {'Size(MB)':>9}  {'#Scales':>7}  {'Output'}")
+    print("-" * 95)
 
     for name, cfg in MODEL_CONFIGS.items():
-        size = cfg.get("input_size", 224)           # đọc metadata resolution nếu có (vd abl_input_64/160)
+        size = cfg.get("input_size", 224)
         x = torch.randn(2, 3, size, size)
-        m = build_model(name, num_classes=5)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            m = build_model(name, num_classes=5)
         m.eval()
         with torch.no_grad():
             y = m(x)
         p = m.count_parameters()
-        print(f"{name:<20} {size:>4}px  {p:>12,}  {p * 4 / 1024 / 1024:>9.2f}  {tuple(y.shape)}")
+        n_scales = len(m.backbone_neck.out_channels)
+        flag = " (!)" if w else ""
+        print(f"{name:<32} {size:>4}px  {p:>12,}  {p * 4 / 1024 / 1024:>9.2f}  {n_scales:>7}  {tuple(y.shape)}{flag}")
