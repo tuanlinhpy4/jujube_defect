@@ -150,72 +150,47 @@ MODEL_CONFIGS = {
     # ── Ablation Study bổ sung ──────────────────────────────────────────
     # -- Group: Head Design --------------------------------------------
     "abl_head_single_p5":  {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "head_mode": "single_scale"},
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "head_mode": "single_scale"},
     "abl_head_dual_p4p5":  {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "head_mode": "dual_scale"},
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "head_mode": "dual_scale"},
     "abl_head_no_neck":    {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "use_neck": False},
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "use_neck": False},
 
     # -- Group: Attention -------------------------------------------------
     "abl_rca_k7":           {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "rca_kernel": 7},
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "rca_kernel": 7},
     "abl_rcm_no_mlp":       {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "rcm_mlp_ratio": 1},
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "rcm_mlp_ratio": 1},
     "abl_mbca_no_shuffle":  {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "mbca_use_channel_shuffle": False},
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "mbca_use_channel_shuffle": False},
     "abl_mbca_no_global":   {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "mbca_use_global_branch": False},
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "mbca_use_global_branch": False},
 
     # -- Group: Depth -------------------------------------------------
     "abl_rcm_single":       {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "rcm_n": 1},
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "rcm_n": 1},
     "abl_c3k2_n1":          {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "c3k2_n_override": 1},
+                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "c3k2_n_override": 1},
 
     # -- Group: Regularization -----------------------------------------
-    "abl_droppath_01":      {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "drop_path_rate": 0.1},
-    "abl_dropout_02":       {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "drop_rate": 0.2},
+    "abl_droppath_01":      {"width_mult": 1.0, "depth_mult": 1.0, "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "drop_path_rate": 0.1},
+    "abl_dropout_02":       {"width_mult": 1.0, "depth_mult": 1.0, "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "drop_rate": 0.2},
 
     # -- Group: Resolution ------------------------------------------------
-    "abl_input_160":        {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "input_size": 160},
+    "abl_input_160":        {"width_mult": 1.0, "depth_mult": 1.0, "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "input_size": 160},
     # GIỮ NGUYÊN kiến trúc sâu /32 của v2, chỉ đổi input_size xuống 64 —
     # đây CHÍNH LÀ cấu hình "input nhỏ nhưng không sửa kiến trúc" đã cho
     # kết quả kém trong benchmark thực tế (bảng đen trong yêu cầu sửa).
     # Dùng entry này làm ĐỐI CHỨNG cho ablation "resolution", KHÔNG dùng
     # để train thật — với input 64px thật sự, hãy dùng "jujube_yolo_64"
     # ở nhóm v3 bên dưới.
-    "abl_input_64":         {"width_mult": 1.0, "depth_mult": 1.0,
-                             "use_dcse": True,  "use_rcm": True,  "use_mbca": True,
-                             "input_size": 64},
+    "abl_input_64":         {"width_mult": 1.0, "depth_mult": 1.0, "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "input_size": 64},
 
     # ── Điều chỉnh lần 1: speed-oriented (chap nhan giam accuracy de doi lay FPS) ─
-    "jujube_yolo_fast":    {"width_mult": 0.75, "depth_mult": 0.67,
-                             "use_dcse": True,  "use_rcm": False, "use_mbca": True,
-                             "use_neck": False},
-    "jujube_yolo_lite":    {"width_mult": 0.50, "depth_mult": 0.34,
-                             "use_dcse": True,  "use_rcm": False, "use_mbca": False,
-                             "use_neck": False},
-    "jujube_yolo_ultra":   {"width_mult": 0.25, "depth_mult": 0.25,
-                             "use_dcse": False, "use_rcm": False, "use_mbca": False,
-                             "use_neck": False},
-    "jujube_yolo_flat":    {"width_mult": 0.50, "depth_mult": 1.0,
-                             "use_dcse": False, "use_rcm": False, "use_mbca": False,
-                             "use_neck": False, "use_flat_backbone": True},
+    "jujube_yolo_fast":    {"width_mult": 0.75, "depth_mult": 0.67, "use_dcse": True,  "use_rcm": False, "use_mbca": True, "use_neck": False},
+    "jujube_yolo_lite":    {"width_mult": 0.50, "depth_mult": 0.34, "use_dcse": True,  "use_rcm": False, "use_mbca": False, "use_neck": False},
+    "jujube_yolo_ultra":   {"width_mult": 0.25, "depth_mult": 0.25, "use_dcse": False, "use_rcm": False, "use_mbca": False, "use_neck": False},
+    "jujube_yolo_flat":    {"width_mult": 0.50, "depth_mult": 1.0, "use_dcse": False, "use_rcm": False, "use_mbca": False, "use_neck": False, "use_flat_backbone": True},
     # (thiết kế cho input >=~128px; xem "jujube_yolo_flat_64" bên dưới cho
     # input 64px — đây là entry đã bị SỬA so với v2, không còn dùng
     # stem 7x7/stride4 + down2 stride4 nữa, xem nhóm v3 bên dưới)
