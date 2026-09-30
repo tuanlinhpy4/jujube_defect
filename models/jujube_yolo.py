@@ -2,40 +2,24 @@
 Jujube-YOLO v3 — DCSE + C3k2_RCM + MBCA (classification variant)
 ------------------------------------------------------------------------
 
-Dựa trên: Wang, L. et al. (2025). "Jujube-YOLO: a precise jujube fruit
-recognition model in unstructured environments." Expert Systems With
-Applications, 291, 128530. https://doi.org/10.1016/j.eswa.2025.128530
+Dựa trên: Wang, L. et al. (2025). "Jujube-YOLO: a precise jujube fruit recognition model in unstructured environments." Expert Systems With Applications, 291, 128530. https://doi.org/10.1016/j.eswa.2025.128530
 
 Lịch sử thay đổi
 -------------------
-v1 -> v2: fix bug nối nhầm feature map P2/4 làm skip-connection cho nhánh
-đang ở P3/8 trong neck; chuyển từ detector sang classifier (GAP đa scale
-P3+P4+P5 -> Linear); thêm bộ tham số ablation (head_mode, rca_kernel,
-rcm_mlp_ratio, rcm_n, mbca_*, c3k2_n_override, drop_path_rate, drop_rate)
-và các variant tối ưu tốc độ (fast/lite/ultra/flat).
+v1 -> v2: fix bug nối nhầm feature map P2/4 làm skip-connection cho nhánh đang ở P3/8 trong neck; chuyển từ detector sang classifier (GAP đa scale P3+P4+P5 -> Linear); thêm bộ tham số ablation (head_mode, rca_kernel,
+rcm_mlp_ratio, rcm_n, mbca_*, c3k2_n_override, drop_path_rate, drop_rate) và các variant tối ưu tốc độ (fast/lite/ultra/flat).
 
 v2 -> v3 (bản này): SỬA VẤN ĐỀ ACCURACY KÉM KHI INPUT GIẢM TỪ 224 XUỐNG 64.
 ====================================================================
-Bối cảnh: file config huấn luyện thực tế (jujube_ours.yaml) đã hạ
-input_size từ 224 xuống 64 để tăng tốc độ. Benchmark thực đo cho thấy khi
-input=224, "jujube_yolo_flat" đạt accuracy CAO NHẤT (89.11%) trong mọi
-model được so sánh; nhưng khi input=64 (giữ NGUYÊN kiến trúc v2, chỉ đổi
-input_size ở dataloader), "jujube_yolo_flat" tụt xuống 86.02% — THẤP HƠN
-cả juyolo_baseline (87.25%) và nhiều baseline nông khác (tinynet_e,
-repghostnet_050, regnetx_002). Nguyên nhân không phải bug runtime (model
-vẫn chạy được, không crash) mà là SAI LỆCH THIẾT KẾ giữa độ sâu backbone
-và độ phân giải ảnh đầu vào:
+Bối cảnh: file config huấn luyện thực tế (jujube_ours.yaml) đã hạ input_size từ 224 xuống 64 để tăng tốc độ. Benchmark thực đo cho thấy khi input=224, "jujube_yolo_flat" đạt accuracy CAO NHẤT (89.11%) trong mọi
+model được so sánh; nhưng khi input=64 (giữ NGUYÊN kiến trúc v2, chỉ đổi input_size ở dataloader), "jujube_yolo_flat" tụt xuống 86.02% — THẤP HƠN cả juyolo_baseline (87.25%) và nhiều baseline nông khác (tinynet_e,
+repghostnet_050, regnetx_002). Nguyên nhân không phải bug runtime (model vẫn chạy được, không crash) mà là SAI LỆCH THIẾT KẾ giữa độ sâu backbone và độ phân giải ảnh đầu vào:
 
 1) Tổng stride backbone quá sâu so với input 64px.
-   JujubeYOLOBackboneNeck (v2) luôn có 5 lớp stride-2 liên tiếp (stem1,
-   stem2, down_p3, down_p4, down_p5) => tổng stride /32. Với input 224px
-   điều này hợp lý (P5 = 7x7). Nhưng với input 64px, P5 chỉ còn 64/32 =
-   2x2 — gần như toàn bộ thông tin không gian (vết nứt/mốc/sâu vốn là chi
-   tiết nhỏ, cục bộ trên vỏ quả) đã bị "vắt cạn" trước khi model kịp học
-   được gì có ý nghĩa ở tầng sâu.
+   JujubeYOLOBackboneNeck (v2) luôn có 5 lớp stride-2 liên tiếp (stem1, stem2, down_p3, down_p4, down_p5) => tổng stride /32. Với input 224px điều này hợp lý (P5 = 7x7). Nhưng với input 64px, P5 chỉ còn 64/32 =
+   2x2 — gần như toàn bộ thông tin không gian (vết nứt/mốc/sâu vốn là chi tiết nhỏ, cục bộ trên vỏ quả) đã bị "vắt cạn" trước khi model kịp học được gì có ý nghĩa ở tầng sâu.
    jujube_yolo_flat (FlatBackbone) còn tệ hơn: stem dùng conv 7x7 stride 4
-   NGAY LỚP ĐẦU TIÊN (blur + downsample rất mạnh khi ảnh vốn đã nhỏ), rồi
-   down2 stride 4 nữa => input 64px chỉ còn 2x2 ở output, tương tự.
+   NGAY LỚP ĐẦU TIÊN (blur + downsample rất mạnh khi ảnh vốn đã nhỏ), rồi down2 stride 4 nữa => input 64px chỉ còn 2x2 ở output, tương tự.
 
 2) RCA (trong RCM) dùng kernel trục lớn cố định (mặc định 11: conv
    (11,1) và (1,11)) trên MỌI feature map, bất kể feature map đó lớn hay
