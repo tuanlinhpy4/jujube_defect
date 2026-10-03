@@ -21,37 +21,18 @@ repghostnet_050, regnetx_002). Nguyên nhân không phải bug runtime (model v�
    jujube_yolo_flat (FlatBackbone) còn tệ hơn: stem dùng conv 7x7 stride 4
    NGAY LỚP ĐẦU TIÊN (blur + downsample rất mạnh khi ảnh vốn đã nhỏ), rồi down2 stride 4 nữa => input 64px chỉ còn 2x2 ở output, tương tự.
 
-2) RCA (trong RCM) dùng kernel trục lớn cố định (mặc định 11: conv
-   (11,1) và (1,11)) trên MỌI feature map, bất kể feature map đó lớn hay
-   nhỏ. Ở input 224px, kernel 11 trên feature map 28-56px là hợp lý (nhìn
-   được ngữ cảnh rộng). Nhưng ở input 64px, feature map các stage chỉ còn
-   2-16px => kernel 11 (padding 5 mỗi bên) chủ yếu là ZERO-PADDING, phép
-   tích chập gần như học nhiễu/hằng số thay vì thông tin không gian thật.
-   Đây KHÔNG gây crash (padding vẫn cho ra shape đúng — khớp với việc
-   model "vẫn chạy được" trong log benchmark), nhưng làm loãng tín hiệu.
-   SPPF (maxpool k=5) trên P5 2x2 gặp vấn đề tương tự.
+2) RCA (trong RCM) dùng kernel trục lớn cố định (mặc định 11: conv (11,1) và (1,11)) trên MỌI feature map, bất kể feature map đó lớn hay nhỏ. Ở input 224px, kernel 11 trên feature map 28-56px là hợp lý (nhìn
+   được ngữ cảnh rộng). Nhưng ở input 64px, feature map các stage chỉ còn 2-16px => kernel 11 (padding 5 mỗi bên) chủ yếu là ZERO-PADDING, phép tích chập gần như học nhiễu/hằng số thay vì thông tin không gian thật.
+   Đây KHÔNG gây crash (padding vẫn cho ra shape đúng — khớp với việc model "vẫn chạy được" trong log benchmark), nhưng làm loãng tín hiệu. SPPF (maxpool k=5) trên P5 2x2 gặp vấn đề tương tự.
 
-3) Neck FPN/PAN (upsample + concat + C3k2) vốn được chính v2 note trong
-   docstring là "gần như vô nghĩa" ở feature map bé (2x2-8x8), nhưng
-   variant "jujube_yolo" (không phải flat) vẫn BẬT neck mặc định kể cả
-   khi dùng input 64px vì train.py chỉ đổi input_size ở dataloader chứ
-   không đổi kiến trúc model theo.
+3) Neck FPN/PAN (upsample + concat + C3k2) vốn được chính v2 note trong docstring là "gần như vô nghĩa" ở feature map bé (2x2-8x8), nhưng variant "jujube_yolo" (không phải flat) vẫn BẬT neck mặc định kể cả
+   khi dùng input 64px vì train.py chỉ đổi input_size ở dataloader chứ không đổi kiến trúc model theo.
 
 Hướng sửa (đã áp dụng trong file này):
-   a) Backbone nông có thể cấu hình được: thêm `stem_strides` (1 hoặc 2
-      lớp stride-2 ở stem) và `num_down_stages` (1-3 cặp down_*/stage_p*
-      sau stem). Tổng stride = 2**stem_strides * 2**num_down_stages, MẶC
-      ĐỊNH giữ nguyên 2 và 3 (tổng /32, giống v2 y hệt — KHÔNG đổi hành vi
-      của các variant cũ dùng cho input >=224px). Các variant mới
-      "*_64" dùng stem_strides=1, num_down_stages=2 => tổng stride chỉ
-      /8, feature map cuối với input 64px là 8x8 (thay vì 2x2) — giữ lại
-      đủ chi tiết không gian cho các vết nứt/mốc/sâu nhỏ.
-   b) Khi num_down_stages < 3, neck FPN/PAN tự động bị TẮT (neck cần đủ
-      3 scale P3/P4/P5). forward() khi đó trả về TOÀN BỘ feature map thô
-      của các stage đã xây (vd (P2,P3,P4)) thay vì chỉ 1 scale sâu nhất
-      như v2 — nhờ vậy head multi_scale vẫn tận dụng được thông tin đa
-      tầng (nông + sâu) mà không tốn chi phí neck vô nghĩa ở feature map
-      bé.
+   a) Backbone nông có thể cấu hình được: thêm `stem_strides` (1 hoặc 2 lớp stride-2 ở stem) và `num_down_stages` (1-3 cặp down_*/stage_p* sau stem). Tổng stride = 2**stem_strides * 2**num_down_stages, MẶC ĐỊNH giữ nguyên 2 và 3 (tổng /32, giống v2 y hệt — KHÔNG đổi hành vi
+      của các variant cũ dùng cho input >=224px). Các variant mới "*_64" dùng stem_strides=1, num_down_stages=2 => tổng stride chỉ /8, feature map cuối với input 64px là 8x8 (thay vì 2x2) — giữ lại đủ chi tiết không gian cho các vết nứt/mốc/sâu nhỏ.
+   b) Khi num_down_stages < 3, neck FPN/PAN tự động bị TẮT (neck cần đủ 3 scale P3/P4/P5). forward() khi đó trả về TOÀN BỘ feature map thô của các stage đã xây (vd (P2,P3,P4)) thay vì chỉ 1 scale sâu nhất
+      như v2 — nhờ vậy head multi_scale vẫn tận dụng được thông tin đa tầng (nông + sâu) mà không tốn chi phí neck vô nghĩa ở feature map bé.
    c) `input_size` (tuỳ chọn) được truyền xuống backbone để TỰ ĐỘNG giới
       hạn (clamp) rca_kernel và sppf_kernel không vượt quá kích thước
       feature map thực tế của từng stage — không còn tình trạng kernel
@@ -171,9 +152,6 @@ MODEL_CONFIGS = {
     "abl_input_64":         {"width_mult": 1.0, "depth_mult": 1.0, "use_dcse": True,  "use_rcm": True,  "use_mbca": True, "input_size": 64},
 
     # ── Điều chỉnh lần 1: speed-oriented (chap nhan giam accuracy de doi lay FPS) ─
-    "jujube_yolo_fast":    {"width_mult": 0.75, "depth_mult": 0.67, "use_dcse": True,  "use_rcm": False, "use_mbca": True, "use_neck": False},
-    "jujube_yolo_lite":    {"width_mult": 0.50, "depth_mult": 0.34, "use_dcse": True,  "use_rcm": False, "use_mbca": False, "use_neck": False},
-    "jujube_yolo_ultra":   {"width_mult": 0.25, "depth_mult": 0.25, "use_dcse": False, "use_rcm": False, "use_mbca": False, "use_neck": False},
     "jujube_yolo_flat":    {"width_mult": 0.50, "depth_mult": 1.0, "use_dcse": False, "use_rcm": False, "use_mbca": False, "use_neck": False, "use_flat_backbone": True},
     # (thiết kế cho input >=~128px; xem "jujube_yolo_flat_64" bên dưới cho
     # input 64px — đây là entry đã bị SỬA so với v2, không còn dùng
@@ -208,17 +186,6 @@ MODEL_CONFIGS = {
         "use_dcse": False, "use_rcm": False, "use_mbca": False,
         "use_neck": False, "use_flat_backbone": True,
         "flat_stem_k": 3, "flat_stem_stride": 2, "flat_down2_stride": 2,
-        "input_size": 64,
-    },
-
-    # DDC4 (giữ nguyên v2 — dùng cho input lớn/flat-backbone chuẩn):
-    "jujube_yolo_flat_64_legacy_deep32": {
-        # bản GỐC v2 của "jujube_yolo_flat_64" (tổng stride /32, P5=2x2 ở
-        # input 64px) — giữ lại chỉ để so sánh đối chứng trong ablation,
-        # KHÔNG khuyến nghị dùng để train thật.
-        "width_mult": 0.50, "depth_mult": 1.0,
-        "use_dcse": False, "use_rcm": False, "use_mbca": False,
-        "use_neck": False, "use_flat_backbone": True,
         "input_size": 64,
     },
 }
