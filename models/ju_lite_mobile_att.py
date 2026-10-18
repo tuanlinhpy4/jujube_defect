@@ -11,6 +11,43 @@ Architecture Overview:
   - Strategy   : Selective attention — CoordAtt injected only at the LAST block of each stage
   - Dataset    : Jujube12000 (6 classes: Normal, Wrinkled, Deformed, Cracked, Mold, Bird-Pecked)
 
+v3 (giữ nguyên): variant "ju_lite_mobile_att_micro" cho input 224 (xem lịch sử bên dưới).
+
+══════════════════════════════════════════════════════════════════════════
+v4 (bản này): THÊM 2 VARIANT CHO INPUT 64x64, ƯU TIÊN FPS (BS=1) BẤT CHẤP ACCURACY
+══════════════════════════════════════════════════════════════════════════
+Vấn đề của các variant cũ khi chạy input 64x64:
+  1) Tổng stride /32 (stem s2 + 4 stage s2) -> feature map cuối chỉ 2x2,
+     mất gần hết thông tin không gian (cùng lỗi đã gặp ở jujube_yolo v2).
+  2) Với BS=1 trên GPU, thời gian chạy bị chi phối bởi SỐ KERNEL LAUNCH chứ
+     không phải FLOPs (ảnh 64x64 quá nhỏ để GPU "bận"). Model cũ có ~30+
+     block, mỗi CoordAtt (SE + ECA + group_conv) tự nó đã ~20 kernel, và
+     h_swish cũ = 4 kernel rời (add, relu6, mul, div) cho MỖI ConvBNHSwish.
+
+Cách sửa (chỉ ảnh hưởng variant mới, variant cũ giữ nguyên cấu trúc/state_dict):
+  a) Backbone nông: stem s2 + 2 lần stride-2 => tổng stride /8, feature
+     map cuối 8x8 (thay vì 2x2). Chỉ 11-17 conv thay vì ~50 conv.
+  b) Bỏ CoordAtt/SE/ECA và bỏ tail (LightHead/CascadedRCAM) ở variant mới
+     (cờ use_att=False, use_tail=False). Vẫn giữ code attention cho variant cũ.
+  c) h_swish dùng F.hardswish (1 kernel thay vì 4, cùng công thức
+     x*relu6(x+3)/6).
+  d) Global pool dùng x.mean((2, 3)) (1 kernel, deterministic backward,
+     không cần AdaptiveAvgPool2d + Flatten).
+  e) Thêm fuse_model(): gộp Conv+BN (bỏ ~1/3 kernel khi inference).
+     GỌI SAU KHI load_state_dict và model.eval().
+
+  Variant mới (input 64, width_mult 1.0, 6 lớp -> số liệu tính từ cấu hình):
+    ju_lite_mobile_att_64       17 conv  ~96K params  ~9.1M MACs  map cuối 8x8
+    ju_lite_mobile_att_64_fast  11 conv  ~83K params  ~7.8M MACs  map cuối 8x8
+  Ước lượng (CHƯA đo, phụ thuộc GPU/CPU host): _64 khoảng 500-800 FPS và
+  _64_fast khoảng 900-1500 FPS ở BS=1 eager; bật fuse_model + fp16 +
+  CUDA graph (xem __main__) còn nhanh hơn nhiều. Hãy chạy `python
+  ju_lite_mobile_att.py` trên máy của bạn để có số thật.
+
+Lưu ý: 2 variant mới dùng stage_cfg riêng, KHÔNG load được checkpoint của
+các variant cũ (shape khác) — cần train lại với input 64.
+══════════════════════════════════════════════════════════════════════════
+
 Optimization notes (v3 — target: <1M params, <6ms GPU latency, >83% F1):
   ┌──────────────────────────────────────────────────────────────────────┐
   │ Change                            │ Effect                           │
@@ -30,14 +67,6 @@ Optimization notes (v3 — target: <1M params, <6ms GPU latency, >83% F1):
   │ [v3] build_model: fp16 flag      │ halves bandwidth on GPU           │
   └──────────────────────────────────────────────────────────────────────┘
   Expected: ~0.55M params · <6ms on T4 GPU · F1 >= 83%
-
-Latency root cause (18ms baseline):
-  The attention modules (SE, ECA, CoordAtt) each launch 5-8 separate GPU
-  kernels. With batch=1 on GPU, kernel-launch overhead dominates over
-  actual compute time. v3 fixes this three ways:
-    1. Fuse ops inside attention modules (fewer, larger kernels)
-    2. torch.compile(mode="reduce-overhead") fuses remaining small ops
-    3. fp16 halves memory bandwidth for all conv/linear ops
 """
 
 import torch
@@ -46,7 +75,7 @@ import torch.nn.functional as F
 
 ARCH_NAME       = "julitemobileatt"
 ARCH_ALIASES    = ["ju_lite_mobile_att", "julitemobile"]
-DEFAULT_VARIANT = "ju_lite_mobile_att_micro"
+DEFAULT_VARIANT = "ju_lite_mobile_att_64"
 
 MODEL_CONFIGS = {
     # original variants (kept for backward compat)
@@ -55,6 +84,17 @@ MODEL_CONFIGS = {
     "ju_lite_mobile_att_xs":    {"input_size": 224, "width_mult": 0.50, "params_M": None,  "optimized": False},
     # optimized variant (target: <1M · <6ms · >83% F1)
     "ju_lite_mobile_att_micro": {"input_size": 224, "width_mult": 0.50, "params_M": 0.55,  "optimized": True},
+
+    # ── v4: thiết kế riêng cho input 64x64, ưu tiên FPS ─────────────────
+    # tổng stride /8 (stem s2 + 2 stage s2) -> feature map cuối 8x8,
+    # không attention, không tail. Channel khai báo tường minh trong
+    # stage_cfg nên để width_mult = 1.0.
+    "ju_lite_mobile_att_64":      {"input_size": 64, "width_mult": 1.00, "params_M": 0.096, "optimized": True,
+                                   "stage_cfg": "fast_64", "stem_c": 16, "stem_stride": 2,
+                                   "use_att": False, "use_tail": False, "head_c": 256},
+    "ju_lite_mobile_att_64_fast": {"input_size": 64, "width_mult": 1.00, "params_M": 0.083, "optimized": True,
+                                   "stage_cfg": "fast_64_xs", "stem_c": 16, "stem_stride": 2,
+                                   "use_att": False, "use_tail": False, "head_c": 192},
 }
 
 
@@ -63,12 +103,14 @@ MODEL_CONFIGS = {
 # ─────────────────────────────────────────────────────────────
 
 def h_swish(x: torch.Tensor) -> torch.Tensor:
-    return x * F.relu6(x + 3.0, inplace=True) / 6.0
+    # F.hardswish = x * relu6(x + 3) / 6, đúng công thức cũ nhưng 1 kernel
+    # thay vì 4 (add, relu6, mul, div).
+    return F.hardswish(x)
 
 
 class HSwish(nn.Module):
     def forward(self, x):
-        return h_swish(x)
+        return F.hardswish(x)
 
 
 class ConvBNHSwish(nn.Module):
@@ -90,13 +132,6 @@ class ConvBNHSwish(nn.Module):
 
 # ─────────────────────────────────────────────────────────────
 # 2. SE Module
-#
-# v3 changes vs v2:
-#   Old: AdaptiveAvgPool2d(1) → Flatten → Linear → ReLU → Linear → Sigmoid
-#        = 6 separate kernels
-#   New: mean() over HW → matmul (fc1) → relu_ → matmul (fc2) → sigmoid
-#        = 4 kernels, mean+matmul fused by torch.compile into 2
-#   Net: ~30% fewer kernel launches in this module
 # ─────────────────────────────────────────────────────────────
 
 class SEModule(nn.Module):
@@ -119,9 +154,6 @@ class SEModule(nn.Module):
 
 # ─────────────────────────────────────────────────────────────
 # 3. ECA Module
-#
-# v3: kept structurally the same; torch.compile fuses the
-#     squeeze/transpose/conv1d/sigmoid chain into fewer kernels.
 # ─────────────────────────────────────────────────────────────
 
 class ECAModule(nn.Module):
@@ -141,14 +173,6 @@ class ECAModule(nn.Module):
 
 # ─────────────────────────────────────────────────────────────
 # 4. CoordAtt
-#
-# v3 changes vs v2:
-#   Old: se(x) → group_conv(s) → adaptive_avg_pool2d → sigmoid → eca(s*attn) → +x
-#        The adaptive_avg_pool2d AFTER group_conv was a second pool call
-#        redundant with what SE already computed.
-#   New: reuse the SE global-average result (s_gap) directly for the
-#        group_conv path — eliminates one AdaptiveAvgPool2d kernel.
-#   Also: merged sigmoid into the attn line (one op instead of two).
 # ─────────────────────────────────────────────────────────────
 
 class CoordAtt(nn.Module):
@@ -258,7 +282,7 @@ class InvertedResidual(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────
-# 9. Stage configs
+# 9. Stage configs   (n_blocks, out_channels, expand_ratio, [stride per block])
 # ─────────────────────────────────────────────────────────────
 
 _STAGE_CFG_ORIGINAL = [
@@ -281,45 +305,85 @@ _STAGE_CFG_OPTIMIZED = [
     (1, 320, 6, [1]),
 ]
 
+# v4 — input 64x64. stem s2 (64->32) + 2 stage s2 (32->16->8) => /8, map cuối 8x8.
+# 5 InvertedResidual (15 conv) + stem + head = 17 conv.
+_STAGE_CFG_FAST_64 = [
+    (1, 24, 4, [2]),             # 32x32 -> 16x16
+    (1, 24, 4, [1]),             # 16x16 (residual)
+    (1, 48, 4, [2]),             # 16x16 -> 8x8
+    (1, 48, 4, [1]),             # 8x8   (residual)
+    (1, 96, 4, [1]),             # 8x8
+]
+
+# v4 — nhanh hơn: 3 InvertedResidual (9 conv) + stem + head = 11 conv.
+_STAGE_CFG_FAST_64_XS = [
+    (1, 32, 4, [2]),             # 32x32 -> 16x16
+    (1, 64, 4, [2]),             # 16x16 -> 8x8
+    (1, 96, 4, [1]),             # 8x8
+]
+
+_STAGE_CFGS = {
+    "original":   _STAGE_CFG_ORIGINAL,
+    "optimized":  _STAGE_CFG_OPTIMIZED,
+    "fast_64":    _STAGE_CFG_FAST_64,
+    "fast_64_xs": _STAGE_CFG_FAST_64_XS,
+}
+
 
 # ─────────────────────────────────────────────────────────────
 # 10. JuLiteMobileAtt
 # ─────────────────────────────────────────────────────────────
 
 class JuLiteMobileAtt(nn.Module):
+    """
+    Các tham số v4 (stage_cfg, stem_c, stem_stride, use_att, use_tail, head_c)
+    đều có giá trị mặc định tái hiện ĐÚNG hành vi v3, nên các variant cũ
+    không đổi cấu trúc / tên tham số / thứ tự khởi tạo.
+    """
     def __init__(self, num_classes=6, width_mult=1.0,
-                 att_reduction=4, optimized=False, dropout=0.2):
+                 att_reduction=4, optimized=False, dropout=0.2,
+                 stage_cfg=None, stem_c=32, stem_stride=2,
+                 use_att=True, use_tail=True, head_c=None):
         super().__init__()
 
         def _c(v): return max(1, int(v * width_mult))
 
-        stage_cfg = _STAGE_CFG_OPTIMIZED if optimized else _STAGE_CFG_ORIGINAL
+        if stage_cfg is None:
+            stage_cfg = _STAGE_CFG_OPTIMIZED if optimized else _STAGE_CFG_ORIGINAL
+        elif isinstance(stage_cfg, str):
+            stage_cfg = _STAGE_CFGS[stage_cfg]
 
-        self.stem = ConvBNHSwish(3, _c(32), 3, stride=2, padding=1)
+        self.stem = ConvBNHSwish(3, _c(stem_c), 3, stride=stem_stride, padding=1)
 
-        stages, in_c = [], _c(32)
+        stages, in_c = [], _c(stem_c)
         for stage_idx, (n, out, t, strides) in enumerate(stage_cfg):
             out_c  = _c(out)
             blocks = []
             for i, s in enumerate(strides):
-                use_att = (i == n - 1) and stage_idx > 0
+                blk_att = use_att and (i == n - 1) and stage_idx > 0
                 blocks.append(InvertedResidual(in_c, out_c, s, t,
-                                               use_coord_att=use_att,
+                                               use_coord_att=blk_att,
                                                att_reduction=att_reduction))
                 in_c = out_c
             stages.append(nn.Sequential(*blocks))
         self.stages = nn.ModuleList(stages)
 
-        if optimized:
-            self.tail = LightHead(in_c, reduction=att_reduction)
-            head_out  = _c(512)
+        if use_tail:
+            if optimized:
+                self.tail = LightHead(in_c, reduction=att_reduction)
+                head_out  = _c(512)
+            else:
+                self.tail = CascadedRCAM(in_c, reduction=att_reduction)
+                head_out  = _c(1280)
+            tail_out = self.tail.out_channels
         else:
-            self.tail = CascadedRCAM(in_c, reduction=att_reduction)
-            head_out  = _c(1280)
+            self.tail = nn.Identity()
+            head_out  = _c(512)
+            tail_out  = in_c
+        if head_c is not None:
+            head_out = _c(head_c)
 
-        self.head_conv   = ConvBNHSwish(self.tail.out_channels, head_out, 1)
-        self.pool        = nn.AdaptiveAvgPool2d(1)
-        self.flatten     = nn.Flatten()
+        self.head_conv   = ConvBNHSwish(tail_out, head_out, 1)
         self.dropout     = nn.Dropout(p=dropout)
         self.classifier  = nn.Linear(head_out, num_classes)
         self.num_classes = num_classes
@@ -340,14 +404,17 @@ class JuLiteMobileAtt(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x):
+    def forward_features(self, x):
+        """Feature map trước global pool, shape (B, C, H, W)."""
         x = self.stem(x)
         for stage in self.stages:
             x = stage(x)
         x = self.tail(x)
-        x = self.head_conv(x)
-        x = self.pool(x)
-        x = self.flatten(x)
+        return self.head_conv(x)
+
+    def forward(self, x):
+        x = self.forward_features(x)
+        x = x.mean(dim=(2, 3))          # global avg pool, 1 kernel (thay Pool+Flatten)
         x = self.dropout(x)
         return self.classifier(x)
 
@@ -358,21 +425,13 @@ class JuLiteMobileAtt(nn.Module):
 # ─────────────────────────────────────────────────────────────
 # 11. build_model
 #
-# v3: thêm compile và fp16 flag trực tiếp vào đây.
+#   compile=True -> torch.compile(mode="reduce-overhead"): gộp kernel nhỏ và
+#                   dùng CUDA graph, hiệu quả nhất ở BS=1 (compile lần đầu
+#                   mất ~30-60s).
+#   fp16=True    -> model.half() (GPU only; nhớ cast input sang half).
 #
-# Cơ chế giảm latency:
-#   compile=True  → torch.compile(mode="reduce-overhead")
-#                   fuse các kernel nhỏ còn lại trong attention
-#                   Dự kiến: 18ms → ~8-10ms
-#
-#   fp16=True     → chuyển model sang half precision
-#                   halves memory bandwidth cho tất cả conv/linear
-#                   Dự kiến: thêm ~30% speedup
-#
-#   Kết hợp cả 2: Dự kiến 18ms → ~4-6ms trên T4
-#
-# Lưu ý: compile lần đầu mất ~30-60s để trace graph (chỉ 1 lần).
-#         Các lần forward sau đó mới đạt latency tối ưu.
+#   fuse_model() (bên dưới) KHÔNG nằm trong build_model vì phải gọi SAU khi
+#   load_state_dict (checkpoint lưu Conv và BN tách rời).
 # ─────────────────────────────────────────────────────────────
 
 def build_model(name=DEFAULT_VARIANT,
@@ -388,29 +447,35 @@ def build_model(name=DEFAULT_VARIANT,
 
     Args:
         name            : Variant key from MODEL_CONFIGS.
-                          Use 'ju_lite_mobile_att_micro' for <1M·<6ms·>83%F1.
+                          'ju_lite_mobile_att_64'      : input 64, cân bằng (17 conv)
+                          'ju_lite_mobile_att_64_fast' : input 64, nhanh nhất (11 conv)
+                          'ju_lite_mobile_att_micro'   : input 224 (v3)
         num_classes     : Number of output classes.
-        in_channels     : Number of input channels (default: 3).
+        in_channels     : Number of input channels (chỉ hỗ trợ 3).
         pretrained      : If True, load weights from pretrained_path.
         pretrained_path : Path to a .pth checkpoint (required if pretrained=True).
         compile         : If True, apply torch.compile(mode='reduce-overhead').
-                          Requires PyTorch >= 2.0. Recommended for inference.
-                          First forward pass is slow (graph tracing); subsequent
-                          calls are fast.
-        fp16            : If True, convert model to float16 (half precision).
-                          GPU only. Cuts memory bandwidth ~2x → ~30% speedup.
-                          Ensure input tensors are also cast to fp16 at inference.
+        fp16            : If True, convert model to float16 (GPU only).
     """
     if name not in MODEL_CONFIGS:
         raise ValueError(f"Unknown variant '{name}'. Available: {list(MODEL_CONFIGS.keys())}")
+    if in_channels != 3:
+        raise ValueError("JuLiteMobileAtt hiện chỉ hỗ trợ in_channels=3.")
 
     cfg   = MODEL_CONFIGS[name]
     model = JuLiteMobileAtt(
         num_classes=num_classes,
         width_mult=cfg["width_mult"],
-        optimized=cfg["optimized"],
+        optimized=cfg.get("optimized", False),
+        stage_cfg=cfg.get("stage_cfg", None),
+        stem_c=cfg.get("stem_c", 32),
+        stem_stride=cfg.get("stem_stride", 2),
+        use_att=cfg.get("use_att", True),
+        use_tail=cfg.get("use_tail", True),
+        head_c=cfg.get("head_c", None),
         **kwargs,
     )
+    model.variant_name = name
 
     if pretrained:
         if pretrained_path is None:
@@ -423,10 +488,33 @@ def build_model(name=DEFAULT_VARIANT,
         model = model.half()
 
     if compile:
-        # mode="reduce-overhead": optimised for small batch / batch=1
-        # trades longer first-run compilation for lower per-call overhead
         model = torch.compile(model, mode="reduce-overhead")
 
+    return model
+
+
+# ─────────────────────────────────────────────────────────────
+# 11b. fuse_model — gộp Conv+BN cho inference
+#
+# Mỗi (Conv2d, BatchNorm2d) liền kề trong nn.Sequential được gộp thành
+# 1 Conv2d có bias, BN thay bằng Identity. Giảm ~1/3 số kernel, kết quả
+# giống model gốc (sai lệch cỡ 1e-6). Chỉ dùng cho inference.
+#
+# Cách dùng:
+#   model = build_model(name, num_classes=...)
+#   model.load_state_dict(sd); model.eval()
+#   model = fuse_model(model)        # SAU load_state_dict
+# ─────────────────────────────────────────────────────────────
+
+def fuse_model(model: nn.Module) -> nn.Module:
+    from torch.nn.utils import fuse_conv_bn_eval
+    model.eval()
+    for m in list(model.modules()):
+        if isinstance(m, nn.Sequential):
+            for i in range(len(m) - 1):
+                if isinstance(m[i], nn.Conv2d) and isinstance(m[i + 1], nn.BatchNorm2d):
+                    m[i] = fuse_conv_bn_eval(m[i], m[i + 1])
+                    m[i + 1] = nn.Identity()
     return model
 
 
@@ -454,7 +542,6 @@ def get_scheduler(optimizer, total_epochs=200, warmup_epochs=1):
 def get_loss(num_classes=6, label_smoothing=0.1):
     """
     Cross-entropy with label smoothing eps=0.1.
-    Improves F1 by ~1-2% at small model scale.
     Set label_smoothing=0.0 to revert to standard CE.
     """
     return nn.CrossEntropyLoss(label_smoothing=label_smoothing)
@@ -476,20 +563,24 @@ def mixup_data(x, y, alpha=0.2, device="cpu"):
 
 # ─────────────────────────────────────────────────────────────
 # 13. Data-augmentation pipeline  (paper Section 4.2)
+#
+# v4: thêm input_size (mặc định 224 = hành vi cũ). Với variant 64 hãy gọi
+#     get_transforms(split, input_size=64). Tỉ lệ Resize/Crop giữ 256/224.
 # ─────────────────────────────────────────────────────────────
 
-def get_transforms(split="train"):
+def get_transforms(split="train", input_size=224):
     try:
         from torchvision import transforms
     except ImportError:
         raise ImportError("torchvision is required.")
 
     mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+    resize = int(round(input_size * 256 / 224))
 
     if split == "train":
         return transforms.Compose([
             transforms.RandomResizedCrop(
-                224, scale=(0.70, 1.0), ratio=(0.8, 1.25),
+                input_size, scale=(0.70, 1.0), ratio=(0.8, 1.25),
                 interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.5),
@@ -501,115 +592,104 @@ def get_transforms(split="train"):
         ])
     else:
         return transforms.Compose([
-            transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.CenterCrop(224),
+            transforms.Resize(resize, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(input_size),
             transforms.ToTensor(),
             transforms.Normalize(mean, std),
         ])
 
 
 # ─────────────────────────────────────────────────────────────
-# 14. Quick sanity check + latency benchmark
+# 14. Self-test + benchmark FPS (BS=1, input 64x64)
 #
-# Cách đo chuẩn trên GPU:
-#   - Model phải .half() TRƯỚC khi .to(device) nếu dùng fp16
-#   - Warm-up compiled model cần ít nhất 50 runs (graph tracing)
-#   - cuda.synchronize() phải bọc CẢ warm-up lẫn timing
-#   - Đo bằng cuda.Event cho kết quả chính xác hơn perf_counter
+#   python ju_lite_mobile_att.py
+#
+# Với mỗi variant 64 đo 4 chế độ:
+#   eager fp32            : model gốc, chạy thẳng (giống harness benchmark thường dùng)
+#   fused fp32            : sau fuse_model (gộp Conv+BN)
+#   fused fp16            : + half precision (GPU)
+#   fused fp16 + CUDAgraph: replay 1 graph, bỏ gần hết overhead launch (GPU)
+# Model khởi tạo ngẫu nhiên (đủ để đo tốc độ, không cần checkpoint).
 # ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import time
 
     device      = "cuda" if torch.cuda.is_available() else "cpu"
-    CLASS_NAMES = ["Normal", "Wrinkled", "Deformed", "Cracked", "Mold", "Bird-Pecked"]
-    RUNS = 300
+    NUM_CLASSES = 5          # sửa cho khớp dataset
+    RUNS, WARMUP = 300, 50
 
-    def latency_ms(model, dummy):
-        """
-        Đo latency chuẩn trên GPU dùng cuda.Event.
-        Model và dummy phải đã được cast đúng dtype và đưa lên device
-        trước khi gọi hàm này.
-        Warm-up 50 runs để compiled model hoàn tất graph tracing.
-        """
-        # warm-up — phải đủ nhiều cho torch.compile hoàn tất tracing
+    # ---- 1) shape check cho mọi variant ----
+    print("Shape check:")
+    for name, cfg in MODEL_CONFIGS.items():
+        s = cfg["input_size"]
+        m = build_model(name, num_classes=NUM_CLASSES).eval()
         with torch.no_grad():
-            for _ in range(50):
-                model(dummy)
+            fmap = m.forward_features(torch.randn(2, 3, s, s))
+            out  = m(torch.randn(2, 3, s, s))
+        assert tuple(out.shape) == (2, NUM_CLASSES)
+        print(f"  {name:<28} in={s:>3}px  params={m.count_parameters()/1e3:>8.1f}K  "
+              f"fmap={tuple(fmap.shape[1:])}  logits={tuple(out.shape)}")
+    print()
 
-        if device == "cuda":
-            # dùng cuda.Event để đo chính xác hơn perf_counter
-            start_evt = torch.cuda.Event(enable_timing=True)
-            end_evt   = torch.cuda.Event(enable_timing=True)
-            torch.cuda.synchronize()
-            start_evt.record()
-            with torch.no_grad():
+    # ---- 2) benchmark ----
+    def time_fn(fn):
+        with torch.no_grad():
+            for _ in range(WARMUP):
+                fn()
+            if device == "cuda":
+                s_evt = torch.cuda.Event(enable_timing=True)
+                e_evt = torch.cuda.Event(enable_timing=True)
+                torch.cuda.synchronize()
+                s_evt.record()
                 for _ in range(RUNS):
-                    model(dummy)
-            end_evt.record()
-            torch.cuda.synchronize()
-            return start_evt.elapsed_time(end_evt) / RUNS   # ms
-        else:
+                    fn()
+                e_evt.record()
+                torch.cuda.synchronize()
+                return s_evt.elapsed_time(e_evt) / RUNS          # ms
             t0 = time.perf_counter()
-            with torch.no_grad():
-                for _ in range(RUNS):
-                    model(dummy)
+            for _ in range(RUNS):
+                fn()
             return (time.perf_counter() - t0) / RUNS * 1000
 
-    dummy_fp32 = torch.randn(1, 3, 224, 224, device=device)
-    dummy_fp16 = dummy_fp32.half()
+    def cuda_graph_fn(model, x):
+        static_x = x.clone()
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side), torch.no_grad():
+            for _ in range(3):
+                model(static_x)
+        torch.cuda.current_stream().wait_stream(side)
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g), torch.no_grad():
+            model(static_x)
+        return g.replay
 
     print(f"PyTorch : {torch.__version__}")
-    print(f"Device  : {device}")
-    if device == "cuda":
-        print(f"GPU     : {torch.cuda.get_device_name(0)}")
-    print()
-    print(f"{'Config':<36} {'Params':>8} {'ms':>8}  Target")
-    print("─" * 62)
+    print(f"Device  : {device}" + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""))
+    print(f"{'Variant / mode':<46} {'ms':>7} {'FPS':>8}")
+    print("─" * 64)
 
-    configs = [
-        # (label, compile, fp16)
-        ("micro  fp32  no-compile",   False, False),
-        ("micro  fp16  no-compile",   False, True),
-        ("micro  fp32  compiled",     True,  False),
-        ("micro  fp16  compiled  ←",  True,  True),   # recommended
-    ]
+    for name in ("ju_lite_mobile_att_64", "ju_lite_mobile_att_64_fast"):
+        s = MODEL_CONFIGS[name]["input_size"]
+        modes = [("eager fp32", False, False, False),
+                 ("fused fp32", True,  False, False)]
+        if device == "cuda":
+            modes += [("fused fp16",            True, True, False),
+                      ("fused fp16 + CUDA graph", True, True, True)]
+        for label, fuse, half, graph in modes:
+            m = build_model(name, num_classes=NUM_CLASSES).to(device).eval()
+            if fuse:
+                m = fuse_model(m)
+            x = torch.randn(1, 3, s, s, device=device)
+            if half:
+                m, x = m.half(), x.half()
+            fn = cuda_graph_fn(m, x) if graph else (lambda m=m, x=x: m(x))
+            ms  = time_fn(fn)
+            fps = 1000.0 / ms
+            tag = "  <- 500-1000" if 500 <= fps <= 1000 else ("  (>1000)" if fps > 1000 else "")
+            print(f"  {name[len('ju_lite_mobile_att_'):] + ' | ' + label:<44} {ms:>7.3f} {fps:>8.0f}{tag}")
+        print()
 
-    for label, use_compile, use_fp16 in configs:
-        # build_model đã xử lý .half() và torch.compile bên trong
-        m = build_model(
-            "ju_lite_mobile_att_micro",
-            num_classes=len(CLASS_NAMES),
-            compile=use_compile,
-            fp16=use_fp16,
-        ).to(device).eval()
-
-        # đếm params từ underlying model (compile wrap không ảnh hưởng)
-        base = m._orig_mod if hasattr(m, "_orig_mod") else m
-        p    = sum(v.numel() for v in base.parameters() if v.requires_grad)
-
-        dummy = dummy_fp16 if use_fp16 else dummy_fp32
-
-        if use_compile:
-            print(f"  {label:<36}  compiling...", end="\r", flush=True)
-
-        ms = latency_ms(m, dummy)
-        ok = "✓ <6ms" if ms < 6.0 else "✗"
-        print(f"  {label:<36} {p/1e6:>6.3f}M {ms:>7.2f}  {ok}")
-
-    print()
-    print("─" * 62)
-    print("Inference code (dùng trong project):")
-    print()
-    print("  # Khởi tạo 1 lần (compile mất ~30-60s lần đầu)")
-    print("  model = build_model(")
-    print("      'ju_lite_mobile_att_micro',")
-    print("      num_classes=6,")
-    print("      compile=True,   # bật kernel fusion")
-    print("      fp16=True,      # bật half precision")
-    print("  ).to('cuda').eval()")
-    print()
-    print("  # Inference (mỗi lần predict)")
-    print("  x = x.cuda().half()            # cast input sang fp16")
-    print("  with torch.no_grad():")
-    print("      logits = model(x)")
+    print("Gợi ý: nếu FPS thấp hơn mục tiêu -> dùng ju_lite_mobile_att_64_fast, gọi")
+    print("fuse_model() sau load_state_dict, và/hoặc bật compile=True / CUDA graph.")
