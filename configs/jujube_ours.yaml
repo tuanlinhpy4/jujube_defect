@@ -2,7 +2,7 @@ dataset: jujube_ours
 data_root: ./data/jujube_ours
 num_classes: 5
 class_names: [dry, insect_damaged, cracked, mold, invalid]
-input_size: 224
+input_size: 64
 batch_size_train: 32
 batch_size_eval: 32
 num_workers: 2
