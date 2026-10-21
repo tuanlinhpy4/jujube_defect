@@ -68,19 +68,7 @@ DEFAULT_VARIANT = "ju_lite_mobile_att_64_turbo"
 LAZY_FUSE = True
 
 MODEL_CONFIGS = {
-    # original variants (kept for backward compat)
-    "ju_lite_mobile_att":       {"input_size": 224, "width_mult": 1.00, "params_M": 2.16,  "optimized": False},
-    "ju_lite_mobile_att_s":     {"input_size": 224, "width_mult": 0.75, "params_M": None,  "optimized": False},
-    "ju_lite_mobile_att_xs":    {"input_size": 224, "width_mult": 0.50, "params_M": None,  "optimized": False},
-    "ju_lite_mobile_att_micro": {"input_size": 224, "width_mult": 0.50, "params_M": 0.55,  "optimized": True},
 
-    # ── v4: input 64, InvertedResidual, không attention (GIỮ NGUYÊN để dùng lại checkpoint) ──
-    "ju_lite_mobile_att_64":      {"input_size": 64, "width_mult": 1.00, "params_M": 0.096, "optimized": True,
-                                   "stage_cfg": "fast_64", "stem_c": 16, "stem_stride": 2,
-                                   "use_att": False, "use_tail": False, "head_c": 256},
-    "ju_lite_mobile_att_64_fast": {"input_size": 64, "width_mult": 1.00, "params_M": 0.083, "optimized": True,
-                                   "stage_cfg": "fast_64_xs", "stem_c": 16, "stem_stride": 2,
-                                   "use_att": False, "use_tail": False, "head_c": 192},
 
     # ── v5: FusedMBConv (conv3x3 thay depthwise), ít op hơn ──
     # turbo: ~15 op khi eval (v4 _64_fast: 21 op) -> ưu tiên FPS
@@ -88,12 +76,7 @@ MODEL_CONFIGS = {
                                     "stage_cfg": "turbo_64", "stem_c": 32, "stem_stride": 2,
                                     "use_att": False, "use_tail": False, "head_c": 192,
                                     "block_type": "fused", "pool": "avg"},
-    # plus: ~23 op khi eval, rộng hơn + avg+max pooling -> ưu tiên F1
-    "ju_lite_mobile_att_64_plus":  {"input_size": 64, "width_mult": 1.00, "params_M": 0.405, "optimized": True,
-                                    "stage_cfg": "plus_64", "stem_c": 32, "stem_stride": 2,
-                                    "use_att": False, "use_tail": False, "head_c": 256,
-                                    "block_type": "fused", "pool": "avgmax"},
-}
+
 
 
 # ─────────────────────────────────────────────────────────────
